@@ -1,0 +1,34 @@
+# Other sites (not yet versioned)
+2023_UP18_25m/
+AllCoreDataCommonFormat/
+
+# SNOWPACK output and intermediate files
+**/output/*.pro
+**/output/*.ini
+**/output/*.png
+**/output/*_backup.pro
+**/current_snow/
+**/cfgfiles/
+**/input/
+**/era_tmp/
+**/cache/
+
+# Keep the output directory itself
+!**/output/.gitkeep
+
+# Stray figures at repo root
+*.png
+
+# Claude Code local settings
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+
+# OS
+.DS_Store
+Thumbs.db
