@@ -719,11 +719,6 @@ def validate_sno_geometry(
     total_thickness = float(np.sum(thick))
     max_thickness = float(np.max(thick))
 
-    print(
-        f"SNO geometry check: file={sno_path.name}, "
-        f"total_thickness={total_thickness:.3f} m, "
-        f"max_layer={max_thickness:.3f} m"
-    )
 
     if max_thickness > max_layer_thickness_m:
         raise RuntimeError(
@@ -2549,12 +2544,8 @@ def get_latest_sno_file(directory: Path, fallback_root: Path | None = None) -> P
         print(f"No .sno files found in {directory}")
         if fallback_root is not None:
             print(f"Also searched recursively under {fallback_root}")
-        print("Directory contents:")
-        for p in sorted(directory.iterdir()):
-            print(" ", p.name)
         raise FileNotFoundError(f"No .sno files found in {directory}")
 
-    print("Latest .sno found:", candidates[-1])
     return candidates[-1]
 
 
@@ -2650,9 +2641,6 @@ def cycle_hourly_snowpack_with_moving_profile(
 
         if not ok:
             raise RuntimeError("SNOWPACK failed\n" + msg)
-
-        print("current_snow contents:", sorted(p.name for p in CURRENT_SNOW_DIR.iterdir()))
-        print("output contents:", sorted(p.name for p in OUTPUT_DIR.iterdir()))
 
         latest_sno = get_latest_sno_file(CURRENT_SNOW_DIR, fallback_root=PROJECT_DIR)
 
