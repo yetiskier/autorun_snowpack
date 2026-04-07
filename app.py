@@ -346,6 +346,11 @@ def _build_column_figure(raw: dict, ti: int, t_label: str, x_var: str) -> go.Fig
     temp_vals = raw[503][ti]
     rg_vals   = raw[512][ti]   # grain radius mm
 
+    # Clip all per-layer arrays to the shortest one (codes can differ in length)
+    n = min(len(heights), len(mk_vals), len(temp_vals), len(rg_vals))
+    heights   = heights[:n];   mk_vals   = mk_vals[:n]
+    temp_vals = temp_vals[:n]; rg_vals   = rg_vals[:n]
+
     surface_cm = heights.max()
     depth_bot  = (surface_cm - heights) / 100.0
     h_prev     = np.concatenate([[surface_cm], heights[:-1]])
@@ -358,22 +363,19 @@ def _build_column_figure(raw: dict, ti: int, t_label: str, x_var: str) -> go.Fig
     hard    = np.array([_code_hardness(c) for c in mk_vals])
 
     if x_var == "Temperature (°C)":
-        # Shift temperatures so 0=left edge; invert so colder extends right
-        x_vals  = -temp_vals          # coldest temperatures plot widest
+        x_vals  = -temp_vals
         x_title = "← colder    Temperature (°C)    warmer →"
         x_range = [max(-temp_vals.max() * 1.1, 30), 0]
         x_tick  = dict(
             tickvals=np.arange(0, 31, 5),
             ticktext=[f"{-v:.0f}" for v in np.arange(0, 31, 5)],
         )
-        hover_x = "T: %{customdata[0]:.2f} °C"
     elif x_var == "Grain radius (mm)":
         x_vals  = rg_vals
         x_title = "Grain radius (mm)"
-        x_range = [0, max(rg_vals.max() * 1.1, 1.0)]
+        x_range = [0, max(float(rg_vals.max()) * 1.1, 1.0)]
         x_tick  = {}
-        hover_x = "rg: %{x:.3f} mm"
-    else:                              # Hardness (default)
+    else:
         x_vals  = hard
         x_title = "Hand hardness  (1 = fist … 6 = ice)"
         x_range = [0, 6.5]
@@ -381,7 +383,15 @@ def _build_column_figure(raw: dict, ti: int, t_label: str, x_var: str) -> go.Fig
             tickvals=[1, 2, 3, 4, 5, 6],
             ticktext=["1\nfist", "2\n4 fingers", "3\n1 finger", "4\npencil", "5\nknife", "6\nice"],
         )
-        hover_x = "Hardness: %{x:.1f}"
+
+    # Build customdata as object array to safely mix floats and strings
+    cd = np.empty((n, 6), dtype=object)
+    cd[:, 0] = temp_vals
+    cd[:, 1] = names
+    cd[:, 2] = depth_top
+    cd[:, 3] = depth_bot
+    cd[:, 4] = rg_vals
+    cd[:, 5] = hard
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -390,7 +400,7 @@ def _build_column_figure(raw: dict, ti: int, t_label: str, x_var: str) -> go.Fig
         y=depth_mid,
         width=thickness,
         marker=dict(color=colors, line=dict(color="rgba(0,0,0,0.25)", width=0.5)),
-        customdata=np.stack([temp_vals, names, depth_top, depth_bot, rg_vals, hard], axis=-1),
+        customdata=cd,
         hovertemplate=(
             "<b>%{customdata[1]}</b><br>"
             "Depth: %{customdata[2]:.2f}–%{customdata[3]:.2f} m<br>"
