@@ -47,9 +47,26 @@ st.title("❄️ SNOWPACK autorun")
 _SITE_RE = re.compile(r"^(\d{4})_(.+?)_(\d+)m_Tempconcatenated\.csv$")
 
 
-def discover_cores() -> list[tuple[int, str, int]]:
-    """Return list of (year, site, depth) for cores that have all three
-    required data files: Tempconcatenated, PROMICE snowfall, density."""
+def _temp_date_range(path: Path) -> tuple[str, str]:
+    """Read the first and last timestamp from a Tempconcatenated CSV.
+    The file has 4 header lines; timestamps are in column 0."""
+    first = last = ""
+    with open(path, errors="replace") as fh:
+        for _ in range(4):          # skip 3 metadata rows + column-header row
+            fh.readline()
+        for line in fh:
+            ts = line.split(",", 1)[0].strip()
+            if not ts:
+                continue
+            if not first:
+                first = ts[:10]     # keep date part only (YYYY-MM-DD)
+            last = ts[:10]
+    return first, last
+
+
+def discover_cores() -> list[tuple[int, str, int, str, str]]:
+    """Return list of (year, site, depth, date_start, date_end) for cores
+    that have all three required data files."""
     cores = []
     if not TEMP_DIR.exists():
         return cores
@@ -62,7 +79,8 @@ def discover_cores() -> list[tuple[int, str, int]]:
         prom = PROM_DIR / f"{sid}_daily_PROMICE_snowfall.csv"
         den  = DEN_DIR  / f"{sid}_den.csv"
         if prom.exists() and den.exists():
-            cores.append((year, site, depth))
+            d0, d1 = _temp_date_range(tf)
+            cores.append((year, site, depth, d0, d1))
     return cores
 
 
@@ -189,7 +207,10 @@ with tab_run:
 
         # --- Core selection ---
         available_cores = discover_cores()
-        core_labels = [f"{y} · {s} · {d} m" for y, s, d in available_cores]
+        core_labels = [
+            f"{y} · {s} · {d} m    {d0} → {d1}"
+            for y, s, d, d0, d1 in available_cores
+        ]
 
         use_custom = st.checkbox("Enter site manually", value=not bool(available_cores))
 
@@ -199,7 +220,7 @@ with tab_run:
                 options=core_labels,
             )
             idx   = core_labels.index(chosen_label)
-            year, site, depth = available_cores[idx]
+            year, site, depth, _, _ = available_cores[idx]
         else:
             if not available_cores:
                 st.info("No cores found in AllCoreDataCommonFormat/ — enter manually.")
