@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import signal
 import subprocess
 import time
@@ -145,30 +146,37 @@ def kill_run(sid: str) -> None:
     pid = read_pid(sid)
     if pid:
         try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
+            # Kill the entire process group (shell + python + grep)
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
             pass
         clear_pid(sid)
 
+
+# Lines from SNOWPACK's Richards-equation solver that clutter the log.
+_LOG_FILTER = r"^\s*(layer \[|upper boundary \[|SAFE MODE|Estimated mass balance|[-]{10})"
 
 def launch_run(year: int, site: str, depth: int, run_until: str) -> int:
     sid = site_id(year, site, depth)
     log = log_path(sid)
     log.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
-        PYTHON, "-u", str(SCRIPT),
-        "--site",  site,
-        "--year",  str(year),
-        "--depth", str(depth),
-    ]
+    py_args = [PYTHON, "-u", str(SCRIPT),
+               "--site", site, "--year", str(year), "--depth", str(depth)]
     if run_until.strip():
-        cmd += ["--run-until", run_until.strip()]
+        py_args += ["--run-until", run_until.strip()]
+
+    # Pipe through grep to strip SNOWPACK's verbose Richards-equation diagnostics
+    py_cmd   = " ".join(shlex.quote(a) for a in py_args)
+    shell_cmd = f"{py_cmd} 2>&1 | grep -vE {shlex.quote(_LOG_FILTER)}"
 
     with open(log, "w") as fh:
-        proc = subprocess.Popen(cmd, stdout=fh, stderr=fh,
-                                cwd=str(APP_DIR),
-                                start_new_session=True)
+        proc = subprocess.Popen(
+            ["bash", "-c", shell_cmd],
+            stdout=fh, stderr=fh,
+            cwd=str(APP_DIR),
+            start_new_session=True,
+        )
     write_pid(sid, proc.pid)
     return proc.pid
 
