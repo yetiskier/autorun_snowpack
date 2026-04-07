@@ -351,12 +351,24 @@ def _build_column_figure(raw: dict, ti: int, t_label: str, x_var: str) -> go.Fig
     heights   = heights[:n];   mk_vals   = mk_vals[:n]
     temp_vals = temp_vals[:n]; rg_vals   = rg_vals[:n]
 
-    surface_cm = heights.max()
-    depth_bot  = (surface_cm - heights) / 100.0
-    h_prev     = np.concatenate([[surface_cm], heights[:-1]])
-    depth_top  = (surface_cm - h_prev)  / 100.0
-    thickness  = depth_bot - depth_top
-    depth_mid  = (depth_top + depth_bot) / 2.0
+    # Sort bottom→top by layer height (PRO should already be sorted, but guard anyway)
+    order     = np.argsort(heights)
+    heights   = heights[order];   mk_vals   = mk_vals[order]
+    temp_vals = temp_vals[order]; rg_vals   = rg_vals[order]
+
+    surface_cm = heights[-1]          # topmost layer height = snow surface
+
+    # Depth of the TOP of each layer below the snow surface (shallow end)
+    depth_top = (surface_cm - heights) / 100.0           # 0 for the topmost layer
+
+    # Bottom of each layer = top of the layer below it; base of layer[0] extrapolated
+    h_base       = np.empty_like(heights)
+    h_base[1:]   = heights[:-1]
+    h_base[0]    = heights[0] - (heights[1] - heights[0]) if n > 1 else 0.0
+    depth_bot    = (surface_cm - h_base) / 100.0         # deeper than depth_top
+
+    thickness = np.clip(depth_bot - depth_top, 0.001, None)   # always positive
+    depth_mid = (depth_top + depth_bot) / 2.0
 
     colors  = [_code_color(c) for c in mk_vals]
     names   = [_code_name(c)  for c in mk_vals]
