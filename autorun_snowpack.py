@@ -1766,7 +1766,8 @@ def build_smet_from_downloaded_era(
 # WRITE INI
 # =============================================================================
 
-def write_ini_file(out_path: Path, smet_name: str, sno_name: str) -> None:
+def write_ini_file(out_path: Path, smet_name: str, sno_name: str,
+                   water_transport: str = "BUCKET") -> None:
     text = f"""[General]
 BUFFER_SIZE = 370
 BUFF_BEFORE = 1.5
@@ -1855,8 +1856,7 @@ NEW_SNOW_GRAIN_SIZE = 0.2
 STRENGTH_MODEL = DEFAULT
 VISCOSITY_MODEL = DEFAULT
 ENABLE_VAPOUR_TRANSPORT = TRUE
-WATERTRANSPORTMODEL_SNOW = BUCKET
-# WATERTRANSPORTMODEL_SNOW = RICHARDSEQUATION
+WATERTRANSPORTMODEL_SNOW = {water_transport}
 LB_COND_WATERFLUX = FREEDRAINAGE
 COUPLEDPHASECHANGES = FALSE
 SOIL_EVAP_MODEL = EVAP_RESISTANCE
@@ -2616,10 +2616,20 @@ def cycle_hourly_snowpack_with_moving_profile(
     ini_file: Path,
     input_sno_file: Path,
     alpha: float,
+    stabilization_days: int = 15,
 ) -> None:
+    """Run SNOWPACK hour-by-hour with temperature assimilation.
+
+    Uses BUCKET water transport for the first ``stabilization_days`` days so
+    the highly-icy initial profile can equilibrate, then rewrites the INI to
+    RICHARDSEQUATION + FREEDRAINAGE for the remainder of the run.
+    """
     times = temp_hourly.index
     if len(times) < 2:
         raise ValueError("Need at least two hourly timestamps.")
+
+    stabilization_hours = stabilization_days * 24
+    switched = False   # have we already switched to RICHARDSEQUATION?
 
     apply_initial_temperature_adjustment(
         input_sno_file=input_sno_file,
@@ -2631,6 +2641,17 @@ def cycle_hourly_snowpack_with_moving_profile(
     for i in range(len(times) - 1):
         t0 = times[i]
         t1 = times[i + 1]
+
+        # Switch water transport scheme after stabilization period
+        if not switched and i >= stabilization_hours:
+            print(f"Stabilization complete at {t0} — switching to RICHARDSEQUATION")
+            write_ini_file(
+                out_path=ini_file,
+                smet_name=FORCING_SMET_FILE.name,
+                sno_name=INITIAL_SNO_FILE.name,
+                water_transport="RICHARDSEQUATION",
+            )
+            switched = True
 
         ok, msg = run_snowpack_one_step(
             snowpack_exe=SNOWPACK_EXE,
@@ -2806,6 +2827,7 @@ def main() -> None:
         ini_file=CFG_INI_FILE,
         input_sno_file=INITIAL_SNO_FILE,
         alpha=ALPHA,
+        stabilization_days=15,
     )
 
     print("Done.")
