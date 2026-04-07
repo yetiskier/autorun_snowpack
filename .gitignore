@@ -1,23 +1,13 @@
-# Other sites (not yet versioned)
-2023_UP18_25m/
+# Data and per-site run directories (all auto-generated)
 AllCoreDataCommonFormat/
-
-# SNOWPACK output and intermediate files
-**/output/*.pro
-**/output/*.ini
-**/output/*.png
-**/output/*_backup.pro
-**/current_snow/
-**/cfgfiles/
-**/input/
-**/era_tmp/
-**/cache/
-
-# Keep the output directory itself
-!**/output/.gitkeep
+????_*_[0-9]*m/
 
 # Stray figures at repo root
 *.png
+
+# Log and process files
+*.log
+**/.autorun.pid
 
 # Claude Code local settings
 .claude/
