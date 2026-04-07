@@ -415,8 +415,8 @@ def show_interactive_charts(sid: str) -> None:
         margin=dict(l=60, r=20, t=40, b=60),
     )
 
-    st.plotly_chart(fig_T,  use_container_width=True)
-    st.plotly_chart(fig_MK, use_container_width=True)
+    st.plotly_chart(fig_T,  width="stretch")
+    st.plotly_chart(fig_MK, width="stretch")
 
     # ------------------------------------------------------------------ #
     # Column plot — profile at selected timestep
@@ -424,11 +424,8 @@ def show_interactive_charts(sid: str) -> None:
     st.markdown("---")
     st.subheader("Stratigraphic column")
 
-    ti = st.slider(
-        "Select timestep",
-        min_value=0, max_value=len(times) - 1, value=0,
-        format_func=lambda i: t_str[i],
-    )
+    ti = st.slider("Select timestep", min_value=0, max_value=len(times) - 1, value=0)
+    st.caption(t_str[ti])
 
     heights = raw[501][ti]   # cm, bottom of each layer
     if len(heights) == 0:
@@ -482,7 +479,7 @@ def show_interactive_charts(sid: str) -> None:
             margin=dict(l=60, r=20, t=40, b=60),
             bargap=0,
         )
-        st.plotly_chart(fig_col, use_container_width=True)
+        st.plotly_chart(fig_col, width="stretch")
 
     with col_legend:
         st.markdown("**Grain types at this timestep**")
@@ -674,4 +671,4 @@ with tab_results:
         st.markdown("---")
         st.subheader("Static figures")
         for fig_path in figs:
-            st.image(str(fig_path), caption=fig_path.name, use_container_width=True)
+            st.image(str(fig_path), caption=fig_path.name, width="stretch")
