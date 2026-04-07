@@ -1,11 +1,17 @@
 """
 Visualize SNOWPACK PRO output for 2022-T3-25m.
 
-Four panels:
+Figure 1 – Temperature (four panels):
   1. Modelled firn temperature  (depth–time curtain)
   2. Observed firn temperature  (same colour scale)
   3. Model − Observation bias   (diverging scale centred at 0)
   4. Modelled liquid-water content (shows why T=0°C regions appear)
+
+Figure 2 – Microstructure (four panels):
+  1. Grain radius rg  (mm)
+  2. Dendricity dd    (grain shape, 0=rounded / 1=dendritic)
+  3. Sphericity sp    (0–1)
+  4. Coordination number nc  (bonds per grain, connectivity)
 
 Run from the project directory:
     python visualize_pro.py
@@ -29,12 +35,14 @@ OBS_FILE    = (PROJECT_DIR.parent.parent
                / "AllCoreDataCommonFormat"
                / "Concatenated_Temperature_files"
                / "2022_T3_25m_Tempconcatenated.csv")
-OUT_FIG     = PROJECT_DIR / "output" / "2022-T3-25m_visualization.png"
+OUT_FIG        = PROJECT_DIR / "output" / "2022-T3-25m_visualization.png"
+OUT_FIG_MICRO  = PROJECT_DIR / "output" / "2022-T3-25m_microstructure.png"
+OUT_FIG_GRAINS = PROJECT_DIR / "output" / "2022-T3-25m_grain_type.png"
 
 # ---------------------------------------------------------------------------
 # PRO parser
 # ---------------------------------------------------------------------------
-WANTED_CODES = {501, 503, 506}   # heights, temperature, LWC
+WANTED_CODES = {501, 503, 506, 509, 510, 512, 513}   # heights, T, LWC, sp, nc, rg, mk
 
 def parse_pro(path: Path) -> dict:
     data   = {c: [] for c in WANTED_CODES}
@@ -72,7 +80,7 @@ def parse_pro(path: Path) -> dict:
 # ---------------------------------------------------------------------------
 # Interpolate ragged profiles onto a fixed depth grid
 # ---------------------------------------------------------------------------
-def to_regular_grid(times, heights_list, values_list, depth_grid):
+def to_regular_grid(times, heights_list, values_list, depth_grid, interp_kind="linear"):
     nt, nd = len(times), len(depth_grid)
     grid   = np.full((nt, nd), np.nan)
     for i, (h, v) in enumerate(zip(heights_list, values_list)):
@@ -85,7 +93,7 @@ def to_regular_grid(times, heights_list, values_list, depth_grid):
         d, v    = d[uniq], v[uniq]
         if len(d) < 2:
             continue
-        f = interp1d(d, v, kind="linear", bounds_error=False, fill_value=np.nan)
+        f = interp1d(d, v, kind=interp_kind, bounds_error=False, fill_value=np.nan)
         grid[i] = f(depth_grid)
     return grid
 
@@ -171,7 +179,7 @@ def main():
     # ---- Colour scales ----
     # Temperature: -24 to 0 °C, centred on -12 °C
     T_levels = np.arange(-24, 1, 2)
-    cmap_T   = plt.cm.RdYlBu      # blue=cold, red=warm; centred white ≈ -12
+    cmap_T   = plt.cm.RdYlBu_r    # red=warm, blue=cold
     norm_T   = BoundaryNorm(T_levels, cmap_T.N)
 
     # Bias: ±10 °C, diverging
@@ -252,6 +260,232 @@ def main():
     OUT_FIG.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUT_FIG, dpi=150, bbox_inches="tight")
     print(f"Saved → {OUT_FIG}")
+
+    # -----------------------------------------------------------------------
+    # Figure 2 – Microstructure
+    # -----------------------------------------------------------------------
+    print("Interpolating microstructure onto regular grid …")
+    RG = to_regular_grid(times, pro[501], pro[512], depth_grid)   # grain radius [mm]
+    MK = to_regular_grid(times, pro[501], pro[513], depth_grid,
+                         interp_kind="nearest")                   # Swiss grain type code
+    SP = to_regular_grid(times, pro[501], pro[509], depth_grid)   # sphericity
+    NC = to_regular_grid(times, pro[501], pro[510], depth_grid)   # coordination number
+
+    fig2, axes2 = plt.subplots(4, 1, figsize=(16, 20),
+                               sharex=True, gridspec_kw={"hspace": 0.07})
+
+    def curtain2(ax, data, norm, cmap, title, cbar_label,
+                 extend="both", mask_nonpositive=False):
+        masked = np.ma.masked_invalid(data)
+        if mask_nonpositive:
+            masked = np.ma.masked_where(masked <= 0, masked)
+        pm = ax.pcolormesh(t_edges, d_edges, masked.T,
+                           cmap=cmap, norm=norm, shading="flat")
+        cb = fig2.colorbar(pm, ax=ax, pad=0.01, fraction=0.018, extend=extend)
+        cb.set_label(cbar_label, fontsize=9)
+        ax.set_ylabel("Depth (m)", fontsize=10)
+        ax.set_ylim(12, 0)
+        ax.yaxis.set_major_locator(plt.MultipleLocator(2))
+        ax.yaxis.set_minor_locator(plt.MultipleLocator(0.5))
+        ax.grid(axis="y", which="major", color="grey", alpha=0.3, linewidth=0.5)
+        ax.set_title(title, fontsize=11, fontweight="bold", loc="left")
+        return pm
+
+    from matplotlib.colors import Normalize
+
+    # Panel 1 – grain radius
+    rg_max = np.nanpercentile(RG[np.isfinite(RG)], 98) if np.any(np.isfinite(RG)) else 3.0
+    curtain2(axes2[0], RG,
+             Normalize(vmin=0, vmax=max(rg_max, 0.1)),
+             plt.cm.turbo,
+             "Grain radius  rg", "rg (mm)", extend="max")
+
+    # Panel 2 – Swiss grain type code (all unique 3-digit codes, grouped by family)
+    from matplotlib.colors import ListedColormap
+    import matplotlib.patches as mpatches
+
+    # Family colours (standard snow-science palette)
+    # 2xx DF, 3xx RG, 4xx FC, 5xx DH, 7xx MF, 8xx IF, 9xx mixed
+    mk_catalog = {
+        # DF – Decomposing/Fragmented (tan/yellow)
+        220: ("#d4b96a", "220 DF"),
+        230: ("#c9a84c", "230 DF mixed"),
+        231: ("#b89030", "231 DF small"),
+        # RG – Rounded Grains (blue)
+        321: ("#a8d8ea", "321 RG small"),
+        330: ("#5dade2", "330 RG"),
+        341: ("#1a6fa8", "341 RG large"),
+        # FC – Faceted Crystals (orange)
+        430: ("#f4a460", "430 FC"),
+        431: ("#e8874a", "431 FC mixed"),
+        440: ("#d4622a", "440 FC/RG"),
+        470: ("#ffd580", "470 FCsf"),
+        471: ("#ffbe33", "471 FCsf mixed"),
+        472: ("#e6a000", "472 FCsf large"),
+        490: ("#c06820", "490 FC mixed"),
+        # DH – Depth Hoar (red/maroon)
+        550: ("#e74c3c", "550 DH"),
+        572: ("#c0392b", "572 DH mixed"),
+        591: ("#922b21", "591 DH cup"),
+        # MF – Melt Forms (purple/pink)
+        751: ("#d7a8e0", "751 MFr"),
+        752: ("#bb72cc", "752 MFr large"),
+        770: ("#8e44ad", "770 MFcr"),
+        772: ("#6c3483", "772 MFcr mixed"),
+        791: ("#f1948a", "791 MF wet"),
+        792: ("#e74c8b", "792 MF wet large"),
+        # IF – Ice Formations (grey)
+        880: ("#7f8c8d", "880 IF/ice"),
+        # mixed/other
+        951: ("#2ecc71", "951 FC/DH mixed"),
+        990: ("#95a5a6", "990 mixed"),
+    }
+
+    all_codes  = sorted(mk_catalog.keys())
+    all_colors = [mk_catalog[c][0] for c in all_codes]
+    all_labels = [mk_catalog[c][1] for c in all_codes]
+    mk_cmap    = ListedColormap(all_colors)
+
+    MK_idx = np.full_like(MK, np.nan)
+    for i, code in enumerate(all_codes):
+        MK_idx = np.where(np.abs(MK - code) < 0.5, float(i), MK_idx)
+
+    axes2[1].pcolormesh(t_edges, d_edges,
+                        np.ma.masked_invalid(MK_idx).T,
+                        cmap=mk_cmap, vmin=-0.5, vmax=len(all_codes) - 0.5,
+                        shading="flat")
+    patches = [mpatches.Patch(color=all_colors[i], label=all_labels[i])
+               for i in range(len(all_codes))]
+    axes2[1].legend(handles=patches, loc="lower right", fontsize=7,
+                    framealpha=0.8, ncol=2)
+    axes2[1].set_ylabel("Depth (m)", fontsize=10)
+    axes2[1].set_ylim(25, 0)
+    axes2[1].yaxis.set_major_locator(plt.MultipleLocator(5))
+    axes2[1].yaxis.set_minor_locator(plt.MultipleLocator(1))
+    axes2[1].grid(axis="y", which="major", color="grey", alpha=0.3, linewidth=0.5)
+    axes2[1].set_title("Swiss grain type code  mk  (513)", fontsize=11, fontweight="bold", loc="left")
+
+    # Panel 3 – sphericity (0 = faceted, 1 = spherical)
+    curtain2(axes2[2], SP,
+             Normalize(vmin=0, vmax=1),
+             plt.cm.RdPu,
+             "Sphericity  sp  (0 = faceted / 1 = spherical)", "sp (–)", extend="neither")
+
+    # Panel 4 – coordination number (connectivity)
+    nc_max = np.nanpercentile(NC[np.isfinite(NC)], 98) if np.any(np.isfinite(NC)) else 20.0
+    curtain2(axes2[3], NC,
+             Normalize(vmin=0, vmax=max(nc_max, 1.0)),
+             plt.cm.viridis,
+             "Coordination number  nc  (bonds per grain, connectivity)", "nc (–)",
+             extend="neither")
+
+    axes2[-1].xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+    axes2[-1].xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    axes2[-1].xaxis.set_minor_locator(mdates.MonthLocator())
+    plt.setp(axes2[-1].xaxis.get_majorticklabels(),
+             rotation=30, ha="right", fontsize=9)
+    for ax in axes2:
+        ax.set_xlim(t_mpl[0], t_mpl[-1])
+
+    fig2.suptitle("SNOWPACK – 2022 T3 25 m  microstructure  (RICHARDSEQUATION scheme)",
+                  fontsize=13, fontweight="bold", y=0.995)
+
+    fig2.savefig(OUT_FIG_MICRO, dpi=150, bbox_inches="tight")
+    print(f"Saved → {OUT_FIG_MICRO}")
+
+    # -----------------------------------------------------------------------
+    # Figure 3 – Grain type only, with accurate absolute depths
+    # Surface is flat at top (depth = 0); soil appears at varying depth
+    # at the bottom, revealing true snowpack thickness changes.
+    # -----------------------------------------------------------------------
+    print("Building grain type figure with accurate depths …")
+
+    # Per-timestep total snowpack depth (cm → m)
+    soil_depth_m = np.array([h.max() / 100.0 for h in pro[501]])
+
+    # Deep enough grid to cover all timesteps (round up to next 0.5 m)
+    max_depth = np.ceil(soil_depth_m.max() * 2) / 2.0   # e.g. 29.5 m
+    depth_grid_full = np.arange(0, max_depth + 0.05, 0.05)
+
+    MK_full = to_regular_grid(times, pro[501], pro[513], depth_grid_full,
+                              interp_kind="nearest")
+
+    # Mask each column below its soil depth
+    for ti in range(len(times)):
+        below_soil = depth_grid_full > soil_depth_m[ti]
+        MK_full[ti, below_soil] = np.nan
+
+    # Map to colour indices (same catalog as before)
+    MK_full_idx = np.full_like(MK_full, np.nan)
+    for i, code in enumerate(all_codes):
+        MK_full_idx = np.where(np.abs(MK_full - code) < 0.5,
+                               float(i), MK_full_idx)
+
+    # Edges for pcolormesh
+    d_edges_full = np.concatenate([
+        [depth_grid_full[0]],
+        0.5 * (depth_grid_full[:-1] + depth_grid_full[1:]),
+        [depth_grid_full[-1]],
+    ])
+
+    fig3, ax3 = plt.subplots(figsize=(16, 7))
+    fig3.subplots_adjust(right=0.72)   # leave room for legend on the right
+
+    ax3.pcolormesh(t_edges, d_edges_full,
+                   np.ma.masked_invalid(MK_full_idx).T,
+                   cmap=mk_cmap, vmin=-0.5, vmax=len(all_codes) - 0.5,
+                   shading="flat")
+
+    # Soil interface line
+    ax3.plot(t_mpl, soil_depth_m, color="k", linewidth=1.5)
+
+    ax3.set_ylabel("Depth below surface (m)", fontsize=11)
+    ax3.set_ylim(12, 0)
+    ax3.yaxis.set_major_locator(plt.MultipleLocator(2))
+    ax3.yaxis.set_minor_locator(plt.MultipleLocator(0.5))
+    ax3.grid(axis="y", which="major", color="grey", alpha=0.3, linewidth=0.5)
+    ax3.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+    ax3.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    ax3.xaxis.set_minor_locator(mdates.WeekdayLocator())
+    plt.setp(ax3.xaxis.get_majorticklabels(), rotation=30, ha="right", fontsize=9)
+    ax3.set_xlim(t_mpl[0], t_mpl[-1])
+    ax3.set_title("Swiss grain type  mk  (513) — surface flat at top, "
+                  "soil depth variation at bottom",
+                  fontsize=11, fontweight="bold", loc="left")
+
+    # Legend outside axes, grouped by grain type family with full names
+    # Family headers use a blank patch as a spacer
+    family_groups = [
+        ("DF – Decomposing & Fragmented particles", [220, 230, 231]),
+        ("RG – Rounded Grains",                     [321, 330, 341]),
+        ("FC – Faceted Crystals",                   [430, 431, 440, 470, 471, 472, 490]),
+        ("DH – Depth Hoar",                         [550, 572, 591]),
+        ("MF – Melt Forms",                         [751, 752, 770, 772, 791, 792]),
+        ("IF – Ice Formations",                     [880]),
+        ("Mixed / other",                           [951, 990]),
+    ]
+
+    legend_handles = [
+        plt.Line2D([0], [0], color="k", linewidth=1.5, label="— Soil interface")
+    ]
+    for family_name, codes in family_groups:
+        legend_handles.append(
+            mpatches.Patch(color="none", label=f"\n{family_name}")
+        )
+        for code in codes:
+            if code in mk_catalog:
+                color, label = mk_catalog[code]
+                legend_handles.append(mpatches.Patch(color=color, label=f"  {label}"))
+
+    ax3.legend(handles=legend_handles, loc="upper left",
+               bbox_to_anchor=(1.01, 1.0), borderaxespad=0,
+               fontsize=8, framealpha=0.9, handlelength=1.2)
+
+    fig3.suptitle("SNOWPACK – 2022 T3 25 m  grain type  (RICHARDSEQUATION scheme)",
+                  fontsize=13, fontweight="bold")
+
+    fig3.savefig(OUT_FIG_GRAINS, dpi=150, bbox_inches="tight")
+    print(f"Saved → {OUT_FIG_GRAINS}")
 
 
 if __name__ == "__main__":

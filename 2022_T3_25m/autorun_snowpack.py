@@ -19,10 +19,12 @@ Workflow:
 
 from __future__ import annotations
 
+import argparse
 import calendar
 import re
 import shutil
 import subprocess
+import tomllib
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -41,96 +43,240 @@ except Exception:
 
 # =============================================================================
 # PATHS AND USER SETTINGS
+# Populated at runtime by configure() — do not edit values here.
+# Edit settings.toml in the parent directory instead.
 # =============================================================================
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = SCRIPT_DIR
-DATA_DIR = SCRIPT_DIR.parent
 
-TEMP_FILE = DATA_DIR / "AllCoreDataCommonFormat/Concatenated_Temperature_files/2022_T3_25m_Tempconcatenated.csv"
-PROMICE_FILE = DATA_DIR / "AllCoreDataCommonFormat/Depth_change_estimate/PROMICE/2022_T3_25m_daily_PROMICE_snowfall.csv"
-DENSITY_FILE = DATA_DIR / "AllCoreDataCommonFormat/CoreDataEGIG/2022_T3_25m_den.csv"
+# All other globals are set by configure() at the start of main().
+PROJECT_DIR = SCRIPT_DIR          # placeholder
+DATA_DIR    = SCRIPT_DIR.parent   # placeholder
 
-KEEP_HOURLY_ARCHIVES = False
-KEEP_LAST_N_SNO = 3
+TEMP_FILE     : Path
+PROMICE_FILE  : Path
+DENSITY_FILE  : Path
 
-INPUT_DIR = PROJECT_DIR / "input"
-CFG_DIR = PROJECT_DIR / "cfgfiles"
-OUTPUT_DIR = PROJECT_DIR / "output"
-CURRENT_SNOW_DIR = PROJECT_DIR / "current_snow"
-ERA_TMP_DIR = PROJECT_DIR / "era_tmp"
-CACHE_DIR = PROJECT_DIR / "cache"
+KEEP_HOURLY_ARCHIVES : bool
+KEEP_LAST_N_SNO      : int
 
-# Lower-boundary / basal-extension settings
-TSG_MODE = "profile_gradient"   # "zero", "soil_temp", or "profile_gradient"
-TSG_LOOKBACK_M = 5.0
-TSG_TARGET_OFFSET_M = 15.0
+INPUT_DIR        : Path
+CFG_DIR          : Path
+OUTPUT_DIR       : Path
+CURRENT_SNOW_DIR : Path
+ERA_TMP_DIR      : Path
+CACHE_DIR        : Path
 
-ADD_BASAL_LAYERS = True
-BASAL_LAYER_THICKNESSES_M = [1.5, 1.0]
-BASAL_TREND_LOOKBACK_M = 5.0
-BASAL_TEMP_MIN_C = -40.0
+INITIAL_SNO_FILE  : Path
+FORCING_SMET_FILE : Path
+CFG_INI_FILE      : Path
 
-for p in [INPUT_DIR, CFG_DIR, OUTPUT_DIR, CURRENT_SNOW_DIR, ERA_TMP_DIR, CACHE_DIR]:
-    p.mkdir(parents=True, exist_ok=True)
+SNOWPACK_EXE            : str
+DEFAULT_ELEVATION_M     : float
+DEFAULT_WATER_FRAC_AT_ZERO : float
+ZERO_TEMP_TOL           : float
+ICE_DENSITY             : float
+WATER_DENSITY           : float
 
-INITIAL_SNO_FILE = INPUT_DIR / "initial_profile.sno"
-FORCING_SMET_FILE = INPUT_DIR / "site_forcing.smet"
-CFG_INI_FILE = CFG_DIR / "site_run.ini"
+CALCULATION_STEP_LENGTH_MIN : float
+HEIGHT_OF_METEO_VALUES      : float
+HEIGHT_OF_WIND_VALUE        : float
+ALPHA                       : float
 
-SNOWPACK_EXE = "/home/yeti/snowmodel/snowpack-master/bin/snowpack"
-
-DEFAULT_ELEVATION_M = 2000.0
-DEFAULT_WATER_FRAC_AT_ZERO = 0.08
-ZERO_TEMP_TOL = 1.0e-9
-ICE_DENSITY = 917.0
-WATER_DENSITY = 1000.0
-
-CALCULATION_STEP_LENGTH_MIN = 15.0
-HEIGHT_OF_METEO_VALUES = 1.0
-HEIGHT_OF_WIND_VALUE = 1.0
-ALPHA = 0.1
-
-ERA5_DATASET = "reanalysis-era5-single-levels"
-ERA5LAND_DATASET = "reanalysis-era5-land-timeseries"
+ERA5_DATASET    : str
+ERA5LAND_DATASET: str
 
 SMET_NODATA = -999
-SMET_TZ = 0
+SMET_TZ     = 0
+SNO_TZ      = 0
+SNO_SOURCE  = "Generated from Tempconcatenated, PROMICE, firn density, and ERA5-Land/ERA5 reanalysis"
 
-SNO_TZ = 0
-SNO_SOURCE = "Generated from Tempconcatenated, PROMICE, firn density, and ERA5-Land/ERA5 reanalysis"
+SLOPE_ANGLE : float
+SLOPE_AZI   : float
+SOIL_ALBEDO : float
+BARE_SOIL_Z0: float
+CANOPY_HEIGHT             : float
+CANOPY_LAI                : float
+CANOPY_DIRECT_THROUGHFALL : float
+WIND_SCALING_FACTOR       : float
+TIMECOUNTDELTAHS          : float
 
-SLOPE_ANGLE = 0.0
-SLOPE_AZI = 0.0
-SOIL_ALBEDO = 0.30
-BARE_SOIL_Z0 = 0.020
-CANOPY_HEIGHT = 0.0
-CANOPY_LAI = 0.0
-CANOPY_DIRECT_THROUGHFALL = 1.0
-WIND_SCALING_FACTOR = 1.0
-TIMECOUNTDELTAHS = 0.0
+DEFAULT_CONDUC_S   : float
+DEFAULT_HEATCAPAC_S: float
+DEFAULT_RG         : float
+DEFAULT_RB         : float
+DEFAULT_DD         : float
+DEFAULT_SP         : float
+DEFAULT_MK         : float
+DEFAULT_MASS_HOAR  : float
+DEFAULT_NE         : float
+DEFAULT_CDOT       : float
+DEFAULT_METAMO     : float
 
-DEFAULT_CONDUC_S = 0.000
-DEFAULT_HEATCAPAC_S = 0.000
-DEFAULT_RG = 0.760
-DEFAULT_RB = 0.680
-DEFAULT_DD = 0.000
-DEFAULT_SP = 0.500
-DEFAULT_MK = 1.000
-DEFAULT_MASS_HOAR = 0.000
-DEFAULT_NE = 1.000
-DEFAULT_CDOT = 0.000
-DEFAULT_METAMO = 0.000
+TSG_MODE            : str
+TSG_LOOKBACK_M      : float
+TSG_TARGET_OFFSET_M : float
+ADD_BASAL_LAYERS          : bool
+BASAL_LAYER_THICKNESSES_M : list
+BASAL_TREND_LOOKBACK_M    : float
+BASAL_TEMP_MIN_C          : float
 
-# Conservative assimilation safeguards
-TEMP_MIN_C = -60.0
-TEMP_MAX_C = 0.0
-MAX_ADJUST_PER_HOUR_C = 0.10
-MIN_OBS_FOR_ADJUST = 3
-# Observed temperature must be below this threshold for a wet layer to be
-# nudged sub-zero (draining its liquid water).  Gives SNOWPACK a 1 °C buffer
-# before we override its phase-transition decision.
-WET_LAYER_DRAIN_THRESHOLD_C = -1.0
+TEMP_MIN_C              : float
+TEMP_MAX_C              : float
+MAX_ADJUST_PER_HOUR_C   : float
+MIN_OBS_FOR_ADJUST      : int
+WET_LAYER_DRAIN_THRESHOLD_C : float
+
+
+# =============================================================================
+# CLI + SETTINGS LOADER
+# =============================================================================
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Autorun SNOWPACK for a firn-core temperature string site.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("--site",  default="T3",
+                   help="Site/traverse name, e.g. T3 or UP18")
+    p.add_argument("--year",  type=int, default=2022,
+                   help="Year the core was drilled, e.g. 2022")
+    p.add_argument("--depth", type=int, default=25,
+                   help="Temperature string depth in metres, e.g. 25")
+    p.add_argument("--run-until", default=None, metavar="YYYY-MM-DD HH:MM",
+                   help="Stop simulation at this timestamp (overrides settings.toml)."
+                        " Omit for full record.")
+    p.add_argument("--settings", type=Path, default=None, metavar="PATH",
+                   help="Path to settings.toml (default: autorun_snowpack/settings.toml)")
+    return p.parse_args()
+
+
+def load_settings(args: argparse.Namespace) -> dict:
+    if args.settings:
+        settings_path = args.settings
+    else:
+        settings_path = SCRIPT_DIR.parent / "settings.toml"
+    if not settings_path.exists():
+        raise FileNotFoundError(
+            f"Settings file not found: {settings_path}\n"
+            f"Create one from the template in the autorun_snowpack/ directory."
+        )
+    with open(settings_path, "rb") as fh:
+        return tomllib.load(fh)
+
+
+def configure(args: argparse.Namespace, cfg: dict) -> None:
+    """Populate all module-level globals from CLI args + settings.toml."""
+    global PROJECT_DIR, DATA_DIR
+    global TEMP_FILE, PROMICE_FILE, DENSITY_FILE
+    global KEEP_HOURLY_ARCHIVES, KEEP_LAST_N_SNO
+    global INPUT_DIR, CFG_DIR, OUTPUT_DIR, CURRENT_SNOW_DIR, ERA_TMP_DIR, CACHE_DIR
+    global INITIAL_SNO_FILE, FORCING_SMET_FILE, CFG_INI_FILE
+    global SNOWPACK_EXE, DEFAULT_ELEVATION_M, DEFAULT_WATER_FRAC_AT_ZERO
+    global ZERO_TEMP_TOL, ICE_DENSITY, WATER_DENSITY
+    global CALCULATION_STEP_LENGTH_MIN, HEIGHT_OF_METEO_VALUES, HEIGHT_OF_WIND_VALUE, ALPHA
+    global ERA5_DATASET, ERA5LAND_DATASET
+    global SLOPE_ANGLE, SLOPE_AZI, SOIL_ALBEDO, BARE_SOIL_Z0
+    global CANOPY_HEIGHT, CANOPY_LAI, CANOPY_DIRECT_THROUGHFALL
+    global WIND_SCALING_FACTOR, TIMECOUNTDELTAHS
+    global DEFAULT_CONDUC_S, DEFAULT_HEATCAPAC_S, DEFAULT_RG, DEFAULT_RB
+    global DEFAULT_DD, DEFAULT_SP, DEFAULT_MK, DEFAULT_MASS_HOAR
+    global DEFAULT_NE, DEFAULT_CDOT, DEFAULT_METAMO
+    global TSG_MODE, TSG_LOOKBACK_M, TSG_TARGET_OFFSET_M
+    global ADD_BASAL_LAYERS, BASAL_LAYER_THICKNESSES_M, BASAL_TREND_LOOKBACK_M, BASAL_TEMP_MIN_C
+    global TEMP_MIN_C, TEMP_MAX_C, MAX_ADJUST_PER_HOUR_C, MIN_OBS_FOR_ADJUST
+    global WET_LAYER_DRAIN_THRESHOLD_C
+
+    site_id  = f"{args.year}_{args.site}_{args.depth}m"
+    base_dir = SCRIPT_DIR.parent           # autorun_snowpack/
+
+    data_root_str = cfg["paths"].get("data_root", "").strip()
+    DATA_DIR    = Path(data_root_str) if data_root_str else base_dir
+    PROJECT_DIR = base_dir / site_id
+
+    TEMP_FILE    = DATA_DIR / f"AllCoreDataCommonFormat/Concatenated_Temperature_files/{site_id}_Tempconcatenated.csv"
+    PROMICE_FILE = DATA_DIR / f"AllCoreDataCommonFormat/Depth_change_estimate/PROMICE/{site_id}_daily_PROMICE_snowfall.csv"
+    DENSITY_FILE = DATA_DIR / f"AllCoreDataCommonFormat/CoreDataEGIG/{site_id}_den.csv"
+
+    INPUT_DIR        = PROJECT_DIR / "input"
+    CFG_DIR          = PROJECT_DIR / "cfgfiles"
+    OUTPUT_DIR       = PROJECT_DIR / "output"
+    CURRENT_SNOW_DIR = PROJECT_DIR / "current_snow"
+    ERA_TMP_DIR      = PROJECT_DIR / "era_tmp"
+    CACHE_DIR        = PROJECT_DIR / "cache"
+
+    for d in [INPUT_DIR, CFG_DIR, OUTPUT_DIR, CURRENT_SNOW_DIR, ERA_TMP_DIR, CACHE_DIR]:
+        d.mkdir(parents=True, exist_ok=True)
+
+    INITIAL_SNO_FILE  = INPUT_DIR / "initial_profile.sno"
+    FORCING_SMET_FILE = INPUT_DIR / "site_forcing.smet"
+    CFG_INI_FILE      = CFG_DIR   / "site_run.ini"
+
+    SNOWPACK_EXE = cfg["paths"]["snowpack_exe"]
+
+    m = cfg["model"]
+    CALCULATION_STEP_LENGTH_MIN = float(m["calculation_step_length_min"])
+    HEIGHT_OF_METEO_VALUES      = float(m["height_of_meteo_values"])
+    HEIGHT_OF_WIND_VALUE        = float(m["height_of_wind_value"])
+    ALPHA                       = float(m["alpha"])
+    DEFAULT_ELEVATION_M         = float(m["default_elevation_m"])
+
+    ph = cfg["physics"]
+    DEFAULT_WATER_FRAC_AT_ZERO = float(ph["default_water_frac_at_zero"])
+    ZERO_TEMP_TOL              = float(ph["zero_temp_tol"])
+    ICE_DENSITY                = float(ph["ice_density"])
+    WATER_DENSITY              = float(ph["water_density"])
+
+    sd = cfg["snow_defaults"]
+    DEFAULT_CONDUC_S    = float(sd["conduc_s"])
+    DEFAULT_HEATCAPAC_S = float(sd["heatcapac_s"])
+    DEFAULT_RG          = float(sd["rg"])
+    DEFAULT_RB          = float(sd["rb"])
+    DEFAULT_DD          = float(sd["dd"])
+    DEFAULT_SP          = float(sd["sp"])
+    DEFAULT_MK          = float(sd["mk"])
+    DEFAULT_MASS_HOAR   = float(sd["mass_hoar"])
+    DEFAULT_NE          = float(sd["ne"])
+    DEFAULT_CDOT        = float(sd["cdot"])
+    DEFAULT_METAMO      = float(sd["metamo"])
+
+    si = cfg["site_defaults"]
+    SLOPE_ANGLE               = float(si["slope_angle"])
+    SLOPE_AZI                 = float(si["slope_azi"])
+    SOIL_ALBEDO               = float(si["soil_albedo"])
+    BARE_SOIL_Z0              = float(si["bare_soil_z0"])
+    CANOPY_HEIGHT             = float(si["canopy_height"])
+    CANOPY_LAI                = float(si["canopy_lai"])
+    CANOPY_DIRECT_THROUGHFALL = float(si["canopy_direct_throughfall"])
+    WIND_SCALING_FACTOR       = float(si["wind_scaling_factor"])
+    TIMECOUNTDELTAHS          = float(si["timecountdeltahs"])
+
+    b = cfg["basal"]
+    TSG_MODE                  = str(b["tsg_mode"])
+    TSG_LOOKBACK_M            = float(b["tsg_lookback_m"])
+    TSG_TARGET_OFFSET_M       = float(b["tsg_target_offset_m"])
+    ADD_BASAL_LAYERS          = bool(b["add_basal_layers"])
+    BASAL_LAYER_THICKNESSES_M = list(b["basal_layer_thicknesses_m"])
+    BASAL_TREND_LOOKBACK_M    = float(b["basal_trend_lookback_m"])
+    BASAL_TEMP_MIN_C          = float(b["basal_temp_min_c"])
+
+    a = cfg["assimilation"]
+    TEMP_MIN_C                  = float(a["temp_min_c"])
+    TEMP_MAX_C                  = float(a["temp_max_c"])
+    MAX_ADJUST_PER_HOUR_C       = float(a["max_adjust_per_hour_c"])
+    MIN_OBS_FOR_ADJUST          = int(a["min_obs_for_adjust"])
+    WET_LAYER_DRAIN_THRESHOLD_C = float(a["wet_layer_drain_threshold_c"])
+
+    e = cfg["era5"]
+    ERA5_DATASET    = str(e["dataset"])
+    ERA5LAND_DATASET = str(e["land_dataset"])
+
+    KEEP_HOURLY_ARCHIVES = bool(cfg["run"]["keep_hourly_archives"])
+    KEEP_LAST_N_SNO      = int(cfg["run"]["keep_last_n_sno"])
+
+    print(f"Site:        {site_id}")
+    print(f"Project dir: {PROJECT_DIR}")
+    print(f"Data root:   {DATA_DIR}")
 
 
 # =============================================================================
@@ -807,11 +953,19 @@ def interpolate_temperature_to_density_layers(
 def compute_volume_fractions(
     T_C: float,
     density_kg_m3: float,
-    ice_density: float = ICE_DENSITY,
-    water_density: float = WATER_DENSITY,
-    default_water_frac_at_zero: float = DEFAULT_WATER_FRAC_AT_ZERO,
-    zero_temp_tol: float = ZERO_TEMP_TOL,
+    ice_density: Optional[float] = None,
+    water_density: Optional[float] = None,
+    default_water_frac_at_zero: Optional[float] = None,
+    zero_temp_tol: Optional[float] = None,
 ) -> Tuple[float, float, float]:
+    if ice_density is None:
+        ice_density = ICE_DENSITY
+    if water_density is None:
+        water_density = WATER_DENSITY
+    if default_water_frac_at_zero is None:
+        default_water_frac_at_zero = DEFAULT_WATER_FRAC_AT_ZERO
+    if zero_temp_tol is None:
+        zero_temp_tol = ZERO_TEMP_TOL
     """
     Convert bulk density and temperature into SNOWPACK volume fractions.
 
@@ -2571,6 +2725,10 @@ def cycle_hourly_snowpack_with_moving_profile(
 # =============================================================================
 
 def main() -> None:
+    args = parse_args()
+    cfg  = load_settings(args)
+    configure(args, cfg)
+
     print("TEMP_FILE   :", TEMP_FILE, TEMP_FILE.exists())
     print("PROMICE_FILE:", PROMICE_FILE, PROMICE_FILE.exists())
     print("DENSITY_FILE:", DENSITY_FILE, DENSITY_FILE.exists())
@@ -2645,8 +2803,9 @@ def main() -> None:
         temp_hourly_original=temp_hourly_original,
     )
 
-    # Set to None to run the full record; set to a date string to stop early.
-    RUN_UNTIL = "2022-09-30 23:00"
+    # --run-until CLI arg overrides settings.toml; empty string means full record.
+    run_until_str = args.run_until or cfg["run"].get("run_until", "").strip() or None
+    RUN_UNTIL = run_until_str
     if RUN_UNTIL is not None:
         cutoff = pd.Timestamp(RUN_UNTIL)
         temp_hourly = temp_hourly[temp_hourly.index <= cutoff]

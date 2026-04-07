@@ -1,0 +1,82 @@
+# =============================================================================
+# SNOWPACK autorun — shared user settings
+# Loaded by autorun_snowpack.py at runtime.
+# CLI arguments (--site, --year, --depth, --run-until) override these values.
+# =============================================================================
+
+[paths]
+# Absolute path to the SNOWPACK binary.
+snowpack_exe = "/home/yeti/snowmodel/snowpack-master/bin/snowpack"
+
+# Root directory that contains AllCoreDataCommonFormat/ and the site folders.
+# Leave empty to auto-detect as the parent of the script's directory.
+data_root = ""
+
+[run]
+# Set to a date string "YYYY-MM-DD HH:MM" to stop early, or "" for full record.
+run_until = ""
+keep_hourly_archives = false
+keep_last_n_sno = 3
+
+[model]
+calculation_step_length_min = 15.0
+height_of_meteo_values      = 1.0
+height_of_wind_value        = 1.0
+# Assimilation relaxation coefficient (0 = no nudge, 1 = full replacement).
+alpha = 0.1
+default_elevation_m = 2000.0
+
+[physics]
+default_water_frac_at_zero = 0.08
+zero_temp_tol  = 1.0e-9
+ice_density    = 917.0
+water_density  = 1000.0
+
+[snow_defaults]
+# Initial microstructure values written to .sno layers.
+conduc_s   = 0.000
+heatcapac_s = 0.000
+rg         = 0.760   # grain radius (mm)
+rb         = 0.680   # bond radius  (mm)
+dd         = 0.000   # dendricity
+sp         = 0.500   # sphericity
+mk         = 1.000   # grain type marker
+mass_hoar  = 0.000
+ne         = 1.000
+cdot       = 0.000
+metamo     = 0.000
+
+[site_defaults]
+slope_angle              = 0.0
+slope_azi                = 0.0
+soil_albedo              = 0.30
+bare_soil_z0             = 0.020
+canopy_height            = 0.0
+canopy_lai               = 0.0
+canopy_direct_throughfall = 1.0
+wind_scaling_factor      = 1.0
+timecountdeltahs         = 0.0
+
+[basal]
+# How to estimate the bottom-boundary temperature.
+# Options: "zero", "soil_temp", "profile_gradient"
+tsg_mode            = "profile_gradient"
+tsg_lookback_m      = 5.0
+tsg_target_offset_m = 15.0
+
+add_basal_layers          = true
+basal_layer_thicknesses_m = [1.5, 1.0]
+basal_trend_lookback_m    = 5.0
+basal_temp_min_c          = -40.0
+
+[assimilation]
+temp_min_c               = -60.0
+temp_max_c               = 0.0
+max_adjust_per_hour_c    = 0.10
+min_obs_for_adjust       = 3
+# Wet layers are only drained when observed T is below this threshold (°C).
+wet_layer_drain_threshold_c = -1.0
+
+[era5]
+dataset      = "reanalysis-era5-single-levels"
+land_dataset = "reanalysis-era5-land-timeseries"
