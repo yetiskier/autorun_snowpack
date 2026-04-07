@@ -339,6 +339,80 @@ def _mk_name_grid(MK_raw: np.ndarray) -> np.ndarray:
     return names
 
 
+def _build_column_figure(raw: dict, ti: int, t_label: str, x_var: str) -> go.Figure:
+    """Build the stratigraphic column figure for a single timestep."""
+    heights   = raw[501][ti]
+    mk_vals   = raw[513][ti]
+    temp_vals = raw[503][ti]
+    rg_vals   = raw[512][ti]   # grain radius mm
+
+    surface_cm = heights.max()
+    depth_bot  = (surface_cm - heights) / 100.0
+    h_prev     = np.concatenate([[surface_cm], heights[:-1]])
+    depth_top  = (surface_cm - h_prev)  / 100.0
+    thickness  = depth_bot - depth_top
+    depth_mid  = (depth_top + depth_bot) / 2.0
+
+    colors  = [_code_color(c) for c in mk_vals]
+    names   = [_code_name(c)  for c in mk_vals]
+    hard    = np.array([_code_hardness(c) for c in mk_vals])
+
+    if x_var == "Temperature (°C)":
+        # Shift temperatures so 0=left edge; invert so colder extends right
+        x_vals  = -temp_vals          # coldest temperatures plot widest
+        x_title = "← colder    Temperature (°C)    warmer →"
+        x_range = [max(-temp_vals.max() * 1.1, 30), 0]
+        x_tick  = dict(
+            tickvals=np.arange(0, 31, 5),
+            ticktext=[f"{-v:.0f}" for v in np.arange(0, 31, 5)],
+        )
+        hover_x = "T: %{customdata[0]:.2f} °C"
+    elif x_var == "Grain radius (mm)":
+        x_vals  = rg_vals
+        x_title = "Grain radius (mm)"
+        x_range = [0, max(rg_vals.max() * 1.1, 1.0)]
+        x_tick  = {}
+        hover_x = "rg: %{x:.3f} mm"
+    else:                              # Hardness (default)
+        x_vals  = hard
+        x_title = "Hand hardness  (1 = fist … 6 = ice)"
+        x_range = [0, 6.5]
+        x_tick  = dict(
+            tickvals=[1, 2, 3, 4, 5, 6],
+            ticktext=["1\nfist", "2\n4 fingers", "3\n1 finger", "4\npencil", "5\nknife", "6\nice"],
+        )
+        hover_x = "Hardness: %{x:.1f}"
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        orientation="h",
+        x=x_vals,
+        y=depth_mid,
+        width=thickness,
+        marker=dict(color=colors, line=dict(color="rgba(0,0,0,0.25)", width=0.5)),
+        customdata=np.stack([temp_vals, names, depth_top, depth_bot, rg_vals, hard], axis=-1),
+        hovertemplate=(
+            "<b>%{customdata[1]}</b><br>"
+            "Depth: %{customdata[2]:.2f}–%{customdata[3]:.2f} m<br>"
+            "T: %{customdata[0]:.2f} °C<br>"
+            "rg: %{customdata[4]:.3f} mm<br>"
+            "Hardness: %{customdata[5]:.1f}"
+            "<extra></extra>"
+        ),
+        showlegend=False,
+    ))
+    fig.update_layout(
+        title=dict(text=t_label, font=dict(size=12)),
+        xaxis=dict(title=x_title, range=x_range, **x_tick),
+        yaxis=dict(title="Depth (m)", autorange="reversed"),
+        height=620,
+        margin=dict(l=55, r=10, t=35, b=55),
+        bargap=0,
+        plot_bgcolor="white",
+    )
+    return fig
+
+
 def show_interactive_charts(sid: str) -> None:
     pro_path = find_pro_file(sid)
     if pro_path is None:
@@ -355,9 +429,125 @@ def show_interactive_charts(sid: str) -> None:
     soil_depth = d["soil_depth_m"]
 
     t_str = [str(t)[:16] for t in times]   # "YYYY-MM-DD HH:MM"
+    mk_names = _mk_name_grid(MK_raw)
 
     # ------------------------------------------------------------------ #
-    # Heatmap 1 — Temperature
+    # Session state — selected timestep
+    # ------------------------------------------------------------------ #
+    key_ti  = f"ti_{sid}"
+    key_var = f"xvar_{sid}"
+    if key_ti  not in st.session_state:
+        st.session_state[key_ti]  = 0
+    if key_var not in st.session_state:
+        st.session_state[key_var] = "Hardness"
+
+    # Controls row
+    ctrl_left, ctrl_right = st.columns([3, 1])
+    with ctrl_left:
+        ti_new = st.slider(
+            "Timestep — click timeline to jump, or drag slider",
+            min_value=0, max_value=len(times) - 1,
+            value=st.session_state[key_ti],
+            key=f"slider_{sid}",
+        )
+        if ti_new != st.session_state[key_ti]:
+            st.session_state[key_ti] = ti_new
+    with ctrl_right:
+        x_var = st.radio(
+            "Column x-axis",
+            ["Hardness", "Temperature (°C)", "Grain radius (mm)"],
+            index=["Hardness", "Temperature (°C)", "Grain radius (mm)"].index(
+                st.session_state[key_var]
+            ),
+            key=f"xvar_radio_{sid}",
+        )
+        st.session_state[key_var] = x_var
+
+    ti = st.session_state[key_ti]
+
+    # ------------------------------------------------------------------ #
+    # Main layout: timeline | column
+    # ------------------------------------------------------------------ #
+    col_tl, col_prof = st.columns([3, 1])
+
+    # ---- Grain-type timeline ----
+    with col_tl:
+        fig_MK = go.Figure(go.Heatmap(
+            x=t_str,
+            y=depth_grid,
+            z=MK_idx.T,
+            colorscale=_MK_COLORSCALE,
+            zmin=-0.5, zmax=_N - 0.5,
+            showscale=False,
+            customdata=np.stack([MK_raw.T, mk_names.T], axis=-1),
+            hovertemplate=(
+                "Date: %{x}<br>"
+                "Depth: %{y:.2f} m<br>"
+                "Code: %{customdata[0]:.0f}  %{customdata[1]}"
+                "<extra></extra>"
+            ),
+        ))
+        # Soil interface
+        fig_MK.add_trace(go.Scatter(
+            x=t_str, y=soil_depth, mode="lines",
+            line=dict(color="black", width=1.5),
+            hoverinfo="skip", showlegend=False,
+        ))
+        # Vertical cursor line at selected timestep
+        fig_MK.add_vline(
+            x=t_str[ti],
+            line=dict(color="white", width=2, dash="dot"),
+        )
+        fig_MK.update_layout(
+            title=f"{sid} — Swiss grain type  (click to select profile)",
+            yaxis=dict(title="Depth (m)", autorange="reversed"),
+            xaxis_title="Date",
+            height=620,
+            margin=dict(l=55, r=10, t=35, b=55),
+            clickmode="event+select",
+        )
+        mk_event = st.plotly_chart(
+            fig_MK, width="stretch",
+            on_select="rerun", key=f"mk_chart_{sid}",
+        )
+        # If user clicked a cell, jump to that timestep
+        if mk_event and mk_event.selection and mk_event.selection.points:
+            clicked_x = mk_event.selection.points[0].get("x", "")
+            if clicked_x in t_str:
+                new_ti = t_str.index(clicked_x)
+                if new_ti != st.session_state[key_ti]:
+                    st.session_state[key_ti] = new_ti
+                    st.rerun()
+
+    # ---- Column profile ----
+    with col_prof:
+        if len(raw[501][ti]) == 0:
+            st.warning("No layers at this timestep.")
+        else:
+            fig_col = _build_column_figure(raw, ti, t_str[ti], x_var)
+            st.plotly_chart(fig_col, width="stretch", key=f"col_chart_{sid}")
+
+            # Compact grain-type legend
+            seen: dict[int, tuple[str, str]] = {}
+            for code, name, color in zip(
+                raw[513][ti],
+                [_code_name(c) for c in raw[513][ti]],
+                [_code_color(c) for c in raw[513][ti]],
+            ):
+                k = int(round(code))
+                if k not in seen and k in MK_CATALOG:
+                    seen[k] = (color, name)
+            st.markdown(
+                " ".join(
+                    f'<span title="{name}" style="background:{color};display:inline-block;'
+                    f'width:12px;height:12px;margin:1px;border-radius:2px"></span>'
+                    for color, name in seen.values()
+                ),
+                unsafe_allow_html=True,
+            )
+
+    # ------------------------------------------------------------------ #
+    # Temperature heatmap (full width, below)
     # ------------------------------------------------------------------ #
     fig_T = go.Figure(go.Heatmap(
         x=t_str,
@@ -367,134 +557,29 @@ def show_interactive_charts(sid: str) -> None:
         zmin=-24, zmax=0,
         colorbar=dict(title="°C", thickness=12),
         hovertemplate=(
-            "Date: %{x}<br>"
-            "Depth: %{y:.2f} m<br>"
-            "T: %{z:.2f} °C"
-            "<extra></extra>"
+            "Date: %{x}<br>Depth: %{y:.2f} m<br>T: %{z:.2f} °C<extra></extra>"
         ),
     ))
+    fig_T.add_vline(x=t_str[ti], line=dict(color="white", width=2, dash="dot"))
     fig_T.update_layout(
         title=f"{sid} — Modelled firn temperature",
         yaxis=dict(title="Depth (m)", autorange="reversed"),
         xaxis_title="Date",
-        height=380,
-        margin=dict(l=60, r=20, t=40, b=60),
+        height=320,
+        margin=dict(l=55, r=10, t=35, b=55),
+        clickmode="event+select",
     )
-
-    # ------------------------------------------------------------------ #
-    # Heatmap 2 — Swiss grain type
-    # ------------------------------------------------------------------ #
-    mk_names = _mk_name_grid(MK_raw)
-    fig_MK = go.Figure(go.Heatmap(
-        x=t_str,
-        y=depth_grid,
-        z=MK_idx.T,
-        colorscale=_MK_COLORSCALE,
-        zmin=-0.5, zmax=_N - 0.5,
-        showscale=False,
-        customdata=np.stack([MK_raw.T, mk_names.T], axis=-1),
-        hovertemplate=(
-            "Date: %{x}<br>"
-            "Depth: %{y:.2f} m<br>"
-            "Code: %{customdata[0]:.0f}<br>"
-            "Type: %{customdata[1]}"
-            "<extra></extra>"
-        ),
-    ))
-    # Soil interface line
-    fig_MK.add_trace(go.Scatter(
-        x=t_str, y=soil_depth,
-        mode="lines", line=dict(color="black", width=1.5),
-        name="Soil interface", hoverinfo="skip",
-    ))
-    fig_MK.update_layout(
-        title=f"{sid} — Swiss grain type (mk 513)",
-        yaxis=dict(title="Depth (m)", autorange="reversed"),
-        xaxis_title="Date",
-        height=380,
-        margin=dict(l=60, r=20, t=40, b=60),
+    T_event = st.plotly_chart(
+        fig_T, width="stretch",
+        on_select="rerun", key=f"T_chart_{sid}",
     )
-
-    st.plotly_chart(fig_T,  width="stretch")
-    st.plotly_chart(fig_MK, width="stretch")
-
-    # ------------------------------------------------------------------ #
-    # Column plot — profile at selected timestep
-    # ------------------------------------------------------------------ #
-    st.markdown("---")
-    st.subheader("Stratigraphic column")
-
-    ti = st.slider("Select timestep", min_value=0, max_value=len(times) - 1, value=0)
-    st.caption(t_str[ti])
-
-    heights = raw[501][ti]   # cm, bottom of each layer
-    if len(heights) == 0:
-        st.warning("No layer data for this timestep.")
-        return
-
-    mk_vals  = raw[513][ti]
-    temp_vals = raw[503][ti]
-    nc_vals  = raw[510][ti]
-
-    # Layer geometry (depth below surface, top→bottom)
-    surface_cm = heights.max()
-    depth_bot  = (surface_cm - heights)       / 100.0   # m
-    h_prev     = np.concatenate([[surface_cm], heights[:-1]])
-    depth_top  = (surface_cm - h_prev)        / 100.0
-    thickness  = depth_bot - depth_top
-    depth_mid  = (depth_top + depth_bot) / 2.0
-
-    hardness = np.array([_code_hardness(c) for c in mk_vals])
-    colors   = [_code_color(c) for c in mk_vals]
-    names    = [_code_name(c)  for c in mk_vals]
-
-    col_profile, col_legend = st.columns([2, 1])
-
-    with col_profile:
-        fig_col = go.Figure()
-        fig_col.add_trace(go.Bar(
-            orientation="h",
-            x=hardness,
-            y=depth_mid,
-            width=thickness,
-            marker=dict(
-                color=colors,
-                line=dict(color="rgba(0,0,0,0.2)", width=0.4),
-            ),
-            customdata=np.stack([temp_vals, names, depth_top, depth_bot], axis=-1),
-            hovertemplate=(
-                "<b>%{customdata[1]}</b><br>"
-                "Depth: %{customdata[2]:.2f}–%{customdata[3]:.2f} m<br>"
-                "T: %{customdata[0]:.2f} °C<br>"
-                "Hardness: %{x:.1f}"
-                "<extra></extra>"
-            ),
-            showlegend=False,
-        ))
-        fig_col.update_layout(
-            title=f"Profile at {t_str[ti]}",
-            xaxis=dict(title="Hand hardness (1=fist … 6=ice)", range=[0, 6.5]),
-            yaxis=dict(title="Depth (m)", autorange="reversed"),
-            height=600,
-            margin=dict(l=60, r=20, t=40, b=60),
-            bargap=0,
-        )
-        st.plotly_chart(fig_col, width="stretch")
-
-    with col_legend:
-        st.markdown("**Grain types at this timestep**")
-        seen = {}
-        for code, name, color in zip(mk_vals, names, colors):
-            k = int(round(code))
-            if k not in seen and k in MK_CATALOG:
-                seen[k] = (color, name)
-        for color, name in seen.values():
-            st.markdown(
-                f'<span style="background:{color};display:inline-block;'
-                f'width:14px;height:14px;margin-right:6px;border-radius:2px;'
-                f'vertical-align:middle"></span>{name}',
-                unsafe_allow_html=True,
-            )
+    if T_event and T_event.selection and T_event.selection.points:
+        clicked_x = T_event.selection.points[0].get("x", "")
+        if clicked_x in t_str:
+            new_ti = t_str.index(clicked_x)
+            if new_ti != st.session_state[key_ti]:
+                st.session_state[key_ti] = new_ti
+                st.rerun()
 
 
 # ---------------------------------------------------------------------------
