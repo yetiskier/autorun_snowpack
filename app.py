@@ -249,6 +249,20 @@ def output_figures(sid: str) -> list[Path]:
     return sorted(out.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def sites_with_results() -> list[str]:
+    """Return site IDs that have at least one .pro file in their output dir."""
+    results = []
+    for d in sorted(APP_DIR.iterdir()):
+        if not d.is_dir():
+            continue
+        if not re.match(r"^\d{4}_.+_\d+m$", d.name):
+            continue
+        out = d / "output"
+        if out.exists() and any(out.glob("*.pro")):
+            results.append(d.name)
+    return results
+
+
 def find_pro_file(sid: str) -> Path | None:
     out = project_dir(sid) / "output"
     pros = list(out.glob("*.pro")) if out.exists() else []
@@ -948,12 +962,23 @@ with tab_settings:
 # TAB 3 — Results
 # ============================================================
 with tab_results:
-    st.subheader(f"Interactive plots — {sid}")
-    show_interactive_charts(sid)
+    result_sites = sites_with_results()
 
-    figs = output_figures(sid)
-    if figs:
-        st.markdown("---")
-        st.subheader("Static figures")
-        for fig_path in figs:
-            st.image(str(fig_path), caption=fig_path.name, width="stretch")
+    if not result_sites:
+        st.info("No results yet — run a simulation first.")
+    else:
+        results_sid = st.selectbox(
+            "Site",
+            options=result_sites,
+            key="results_sid_select",
+        )
+
+        st.subheader(f"Interactive plots — {results_sid}")
+        show_interactive_charts(results_sid)
+
+        figs = output_figures(results_sid)
+        if figs:
+            st.markdown("---")
+            st.subheader("Static figures")
+            for fig_path in figs:
+                st.image(str(fig_path), caption=fig_path.name, width="stretch")
