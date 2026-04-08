@@ -200,6 +200,37 @@ def read_log_tail(sid: str, n_lines: int = 60) -> str:
     return "\n".join(lines[-n_lines:])
 
 
+def get_pro_current_time(sid: str) -> "pd.Timestamp | None":
+    """Read the most recent timestep from the tail of the PRO file."""
+    pro = find_pro_file(sid)
+    if pro is None or not pro.exists():
+        return None
+    try:
+        with open(pro, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 3000))
+            tail = fh.read().decode("utf-8", errors="replace")
+        for line in reversed(tail.splitlines()):
+            if line.startswith("0500,"):
+                return pd.to_datetime(line[5:].strip(), dayfirst=True)
+    except Exception:
+        pass
+    return None
+
+
+def get_expected_date_range(sid: str) -> "tuple[pd.Timestamp | None, pd.Timestamp | None]":
+    """Return (start, end) dates from the Tempconcatenated CSV for this sid."""
+    csv = TEMP_DIR / f"{sid}_Tempconcatenated.csv"
+    if not csv.exists():
+        return None, None
+    try:
+        d0, d1 = _temp_date_range(csv)
+        return pd.to_datetime(d0), pd.to_datetime(d1)
+    except Exception:
+        return None, None
+
+
 def output_figures(sid: str) -> list[Path]:
     out = project_dir(sid) / "output"
     if not out.exists():
@@ -787,23 +818,42 @@ with tab_run:
             st.rerun()
 
     with col_status:
-        st.subheader(f"Log — {sid}")
+        st.subheader(f"Status — {sid}")
 
+        crashed = False
         if running:
             st.status("Running…", state="running")
         else:
             pid = read_pid(sid)
             if pid is None and log_path(sid).exists():
-                last = read_log_tail(sid, 3)
+                last = read_log_tail(sid, 5)
                 if "Done." in last:
                     st.status("Finished", state="complete")
                 else:
-                    st.status("Stopped / not started", state="error")
+                    st.status("Crashed / stopped", state="error")
+                    crashed = True
             else:
-                st.status("Not running", state="error")
+                st.status("Not started", state="error")
 
-        log_text = read_log_tail(sid, 80)
-        st.code(log_text, language="text")
+        # Progress bar
+        t_start, t_end = get_expected_date_range(sid)
+        t_cur = get_pro_current_time(sid)
+        if t_start and t_end and t_cur:
+            total_s   = (t_end   - t_start).total_seconds()
+            elapsed_s = (t_cur   - t_start).total_seconds()
+            frac = float(max(0.0, min(1.0, elapsed_s / total_s))) if total_s > 0 else 0.0
+            label = (
+                f"{t_cur.strftime('%Y-%m-%d')} / {t_end.strftime('%Y-%m-%d')}"
+                f"  ({frac * 100:.0f}%)"
+            )
+            st.progress(frac, text=label)
+        elif running:
+            st.progress(0.0, text="Starting…")
+
+        # Only show log when the run has crashed
+        if crashed:
+            st.markdown("**Run log (crash output):**")
+            st.code(read_log_tail(sid, 100), language="text")
 
         if running:
             time.sleep(3)
