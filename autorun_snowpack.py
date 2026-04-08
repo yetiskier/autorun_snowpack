@@ -24,6 +24,7 @@ import calendar
 import re
 import shutil
 import subprocess
+import sys
 import tomllib
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -1460,7 +1461,9 @@ def download_era5_static_geopotential_once(
         raise RuntimeError("cdsapi is not installed or importable.")
 
     c = cdsapi.Client()
-    area = build_area(lat, lon, pad_deg=0.1)
+    # ERA5 native grid is 0.25°, so use ≥0.5° padding to guarantee at least
+    # one grid point falls inside the bounding box regardless of site position.
+    area = build_area(lat, lon, pad_deg=0.5)
 
     c.retrieve(
         ERA5_DATASET,
@@ -1838,7 +1841,8 @@ SW_MODE = INCOMING
 ATMOSPHERIC_STABILITY = MO_MICHLMAYR
 CANOPY = FALSE
 MEAS_TSS = FALSE
-CHANGE_BC = FALSE
+CHANGE_BC = TRUE
+THRESH_CHANGE_BC = 0.5
 SNP_SOIL = FALSE
 
 [SnowpackAdvanced]
@@ -2829,6 +2833,17 @@ def main() -> None:
         alpha=ALPHA,
         stabilization_days=15,
     )
+
+    # Generate static PNG figures via visualize_pro.py
+    viz_script = Path(__file__).resolve().parent / "visualize_pro.py"
+    if viz_script.exists():
+        print(f"Generating figures with {viz_script.name} …")
+        subprocess.run(
+            [sys.executable, str(viz_script),
+             "--site", args.site, "--year", str(args.year), "--depth", str(args.depth)],
+            cwd=str(Path(__file__).resolve().parent),
+            check=False,
+        )
 
     print("Done.")
 
