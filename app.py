@@ -192,6 +192,17 @@ def save_settings(doc: tomlkit.TOMLDocument) -> None:
     SETTINGS_FILE.write_text(tomlkit.dumps(doc))
 
 
+# Matches anything that looks like a file-system path (absolute, relative, or ~)
+_PATH_IN_LINE = re.compile(r'(?:^|[\s\'",(=])(?:~|\.{0,2})?/[/\w.\-]+')
+
+def _strip_path_lines(text: str) -> str:
+    """Remove lines that contain a file-system path."""
+    return "\n".join(
+        line for line in text.splitlines()
+        if not _PATH_IN_LINE.search(line)
+    )
+
+
 def read_log_tail(sid: str, n_lines: int = 60) -> str:
     lp = log_path(sid)
     if not lp.exists():
@@ -853,7 +864,7 @@ with tab_run:
         # Only show log when the run has crashed
         if crashed:
             st.markdown("**Run log (crash output):**")
-            st.code(read_log_tail(sid, 100), language="text")
+            st.code(_strip_path_lines(read_log_tail(sid, 100)), language="text")
 
         if running:
             time.sleep(3)
