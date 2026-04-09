@@ -139,10 +139,23 @@ def is_running(sid: str) -> bool:
         return False
     try:
         os.kill(pid, 0)   # signal 0 = existence check
-        return True
     except (ProcessLookupError, PermissionError):
         clear_pid(sid)
         return False
+    # A zombie passes the kill(0) check but the process has actually finished.
+    # Read /proc/<pid>/status to detect this case.
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("State:"):
+                if "Z" in line:          # zombie — process done, not yet reaped
+                    clear_pid(sid)
+                    return False
+                break
+    except OSError:
+        # /proc entry vanished between the kill check and here — process is gone
+        clear_pid(sid)
+        return False
+    return True
 
 
 def kill_run(sid: str) -> None:
@@ -230,6 +243,7 @@ def get_pro_current_time(sid: str) -> "pd.Timestamp | None":
     return None
 
 
+@st.cache_data(show_spinner=False)
 def get_expected_date_range(sid: str) -> "tuple[pd.Timestamp | None, pd.Timestamp | None]":
     """Return (start, end) dates from the Tempconcatenated CSV for this sid."""
     csv = TEMP_DIR / f"{sid}_Tempconcatenated.csv"
