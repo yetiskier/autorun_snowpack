@@ -507,7 +507,7 @@ def _profile_for_timestep(raw: dict, ti: int) -> dict | None:
     dbot      = (surface - hbase) / 100.0
     thick     = np.clip(dbot - dtop, 0.001, None)
     dmid      = (dtop + dbot) / 2.0
-    t_max     = max(float(np.abs(temp).max()) * 1.05, 2.0)
+    t_max     = min(max(float(np.abs(temp).max()) * 1.05, 2.0), 30.0)
     return {
         "hard":      [round(float(_code_hardness(c)), 2) for c in mk],
         "temp":      [round(float(v), 2)  for v in temp],
@@ -736,7 +736,7 @@ document.getElementById('mk-div').on('plotly_hover',function(data){{
 
     fig_T = go.Figure(go.Heatmap(
         x=t_dt, y=depth_grid, z=T_grid.T,
-        colorscale="RdYlBu_r", zmin=-24, zmax=0,
+        colorscale="RdYlBu_r", zmin=-30, zmax=0,
         colorbar=dict(title="°C", thickness=12),
         hovertemplate="Date: %{x}<br>Depth: %{y:.2f} m<br>T: %{z:.2f} °C<extra></extra>",
     ))
@@ -769,8 +769,7 @@ document.getElementById('mk-div').on('plotly_hover',function(data){{
     if obs is not None:
         obs_times, obs_depths, obs_T = obs
         # Clamp color scale to same range as modelled for direct comparison
-        t_min_obs = float(np.nanmin(obs_T))
-        zmin_obs  = min(t_min_obs, -24.0)
+        zmin_obs  = -30.0
         fig_obs = go.Figure(go.Heatmap(
             x=obs_times.to_pydatetime(),
             y=obs_depths,
