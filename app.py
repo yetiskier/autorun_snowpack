@@ -734,9 +734,10 @@ document.getElementById('mk-div').on('plotly_hover',function(data){{
         st.session_state[key_ti] = 0
     ti = st.session_state[key_ti]
 
+    zmin_T = max(float(np.nanmin(T_grid)) - 1.0, -30.0)
     fig_T = go.Figure(go.Heatmap(
         x=t_dt, y=depth_grid, z=T_grid.T,
-        colorscale="RdYlBu_r", zmin=-30, zmax=0,
+        colorscale="RdYlBu_r", zmin=zmin_T, zmax=0,
         colorbar=dict(title="°C", thickness=12),
         hovertemplate="Date: %{x}<br>Depth: %{y:.2f} m<br>T: %{z:.2f} °C<extra></extra>",
     ))
@@ -768,8 +769,7 @@ document.getElementById('mk-div').on('plotly_hover',function(data){{
     obs = load_observed_temp(sid)
     if obs is not None:
         obs_times, obs_depths, obs_T = obs
-        # Clamp color scale to same range as modelled for direct comparison
-        zmin_obs  = -30.0
+        zmin_obs = max(float(np.nanmin(obs_T)) - 1.0, -30.0)
         fig_obs = go.Figure(go.Heatmap(
             x=obs_times.to_pydatetime(),
             y=obs_depths,
