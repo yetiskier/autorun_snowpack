@@ -734,10 +734,16 @@ document.getElementById('mk-div').on('plotly_hover',function(data){{
         st.session_state[key_ti] = 0
     ti = st.session_state[key_ti]
 
-    zmin_T = max(float(np.nanmin(T_grid)) - 1.0, -30.0)
+    # Compute shared colorscale limits from observed data (falls back to modelled)
+    obs = load_observed_temp(sid)
+    if obs is not None:
+        zmin_shared = max(float(np.nanmin(obs[2])) - 1.0, -30.0)
+    else:
+        zmin_shared = max(float(np.nanmin(T_grid)) - 1.0, -30.0)
+
     fig_T = go.Figure(go.Heatmap(
         x=t_dt, y=depth_grid, z=T_grid.T,
-        colorscale="RdYlBu_r", zmin=zmin_T, zmax=0,
+        colorscale="RdYlBu_r", zmin=zmin_shared, zmax=0,
         colorbar=dict(title="°C", thickness=12),
         hovertemplate="Date: %{x}<br>Depth: %{y:.2f} m<br>T: %{z:.2f} °C<extra></extra>",
     ))
@@ -766,16 +772,14 @@ document.getElementById('mk-div').on('plotly_hover',function(data){{
     # ------------------------------------------------------------------ #
     # Observed temperature heatmap (full width)
     # ------------------------------------------------------------------ #
-    obs = load_observed_temp(sid)
     if obs is not None:
         obs_times, obs_depths, obs_T = obs
-        zmin_obs = max(float(np.nanmin(obs_T)) - 1.0, -30.0)
         fig_obs = go.Figure(go.Heatmap(
             x=obs_times.to_pydatetime(),
             y=obs_depths,
             z=obs_T.T,
             colorscale="RdYlBu_r",
-            zmin=zmin_obs, zmax=0,
+            zmin=zmin_shared, zmax=0,
             colorbar=dict(title="°C", thickness=12),
             hovertemplate=(
                 "Date: %{x}<br>Depth: %{y:.2f} m<br>T: %{z:.2f} °C<extra></extra>"
