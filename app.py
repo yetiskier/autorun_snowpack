@@ -528,8 +528,8 @@ def _profile_for_timestep(raw: dict, ti: int) -> dict | None:
     }
 
 
-def _density_profile_for_timestep(raw: dict, ti: int) -> dict | None:
-    """Return step-function x/y arrays for a density-vs-depth profile."""
+def _density_profile_for_timestep(raw: dict, ti: int, smooth_cm: float = 50.0) -> dict | None:
+    """Return smoothed density-vs-depth profile (50 cm box filter by default)."""
     heights = raw[501][ti]
     density = raw[502][ti]
     n = min(len(heights), len(density))
@@ -539,21 +539,30 @@ def _density_profile_for_timestep(raw: dict, ti: int) -> dict | None:
     order   = np.argsort(heights)
     heights = heights[order]; density = density[order]
     surface  = float(heights[-1])
-    dtop     = (surface - heights) / 100.0
-    hbase    = np.empty_like(heights)
-    hbase[1:] = heights[:-1]
-    hbase[0]  = heights[0] - (heights[1] - heights[0])
-    dbot      = (surface - hbase) / 100.0
-    # Build step-function: vertical segment per layer + horizontal jump at boundary
-    xs: list[float] = []
-    ys: list[float] = []
-    for j in range(n):
-        xs.extend([round(float(density[j]), 1), round(float(density[j]), 1)])
-        ys.extend([round(float(dtop[j]), 4),    round(float(dbot[j]), 4)])
-        if j < n - 1:
-            xs.append(round(float(density[j + 1]), 1))
-            ys.append(round(float(dbot[j]), 4))
-    return {"x": xs, "y": ys}
+
+    # Regular 5 cm depth grid spanning the full profile
+    grid_step = 5.0          # cm
+    depth_max = (surface - heights[0]) / 100.0
+    depth_grid = np.arange(0.0, depth_max + grid_step / 100.0, grid_step / 100.0)
+
+    # Step-function assignment: each grid cell → containing element
+    h_at_d = surface - depth_grid * 100.0
+    idx    = np.searchsorted(heights, h_at_d, side="left")
+    valid  = (idx < n) & (h_at_d >= heights[0])
+    den    = np.full(len(depth_grid), np.nan)
+    den[valid] = density[idx[valid]]
+
+    # Box-filter smoothing over 50 cm (= 50/5 = 10 cells)
+    w = max(1, int(round(smooth_cm / grid_step)))
+    kernel  = np.ones(w) / w
+    padded  = np.pad(den, w // 2, mode="edge")
+    den_sm  = np.convolve(padded, kernel, mode="valid")[: len(den)]
+    den_sm[~valid] = np.nan
+
+    mask = np.isfinite(den_sm)
+    xs = [round(float(v), 1) for v in den_sm[mask]]
+    ys = [round(float(v), 4) for v in depth_grid[mask]]
+    return {"x": xs, "y": ys} if xs else None
 
 
 @st.cache_data(show_spinner="Preparing density data…")
