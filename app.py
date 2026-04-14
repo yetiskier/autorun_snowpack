@@ -558,11 +558,10 @@ def _build_hover_payload(pro_path_str: str, _mtime: float = 0.0) -> str:
             out.append(row)
         return out
 
-    # Precompute column profiles for every original hourly timestep
-    profiles = []
-    for ti in range(n_times):
-        p = _profile_for_timestep(raw, ti)
-        profiles.append(p)  # None if empty
+    # Precompute profiles only for the downsampled timesteps used by the heatmap.
+    # The hover handler indexes profiles by the heatmap column index directly,
+    # so we only need len(idx) profiles instead of all n_times hourly profiles.
+    profiles = [_profile_for_timestep(raw, ti) for ti in idx]
 
     payload = {
         "heatmap": {
@@ -576,11 +575,8 @@ def _build_hover_payload(pro_path_str: str, _mtime: float = 0.0) -> str:
             "zmax":       float(_N) - 0.5,
             "maxDepth":   float(depth_grid.max()),
         },
-        # Mapping from downsampled index → original hourly index
-        "idx":      idx,
-        # All hourly profiles (None entries for empty timesteps)
+        # One profile per heatmap column (indexed by subIdx, same as heatmap x)
         "profiles": profiles,
-        "t_all":    [str(t)[:16] for t in times],
     }
     return json.dumps(payload, allow_nan=False)
 
@@ -617,9 +613,7 @@ body{{background:transparent;font-family:sans-serif;overflow:hidden}}
 <script>
 var PL = {payload};
 var hd = PL.heatmap;
-var profiles = PL.profiles;
-var idx = PL.idx;          // downsampled → hourly index map
-var t_all = PL.t_all;      // all hourly labels
+var profiles = PL.profiles;  // one entry per heatmap column
 
 /* ── Grain-type heatmap ── */
 Plotly.newPlot('mk-div',[
@@ -676,26 +670,24 @@ function colLayout(p,label){{
 /* Initial render — first non-null profile */
 var p0=null,i0=0;
 for(var i=0;i<profiles.length;i++){{if(profiles[i]){{p0=profiles[i];i0=i;break;}}}}
-if(p0) Plotly.newPlot('col-div',colTraces(p0),colLayout(p0,t_all[i0]),
+if(p0) Plotly.newPlot('col-div',colTraces(p0),colLayout(p0,hd.x[i0]),
                       {{responsive:true,displayModeBar:false}});
 
 /* ── Hover handler ── */
-var curHourly=-1;
+var curSub=-1;
 document.getElementById('mk-div').on('plotly_hover',function(data){{
   if(!data||!data.points||!data.points.length) return;
   var pt=data.points[0];
   // pointIndex for heatmap: [depth_idx, time_idx]
   var subIdx=Array.isArray(pt.pointIndex)?pt.pointIndex[1]:0;
-  // Map downsampled index → nearest hourly index
-  var hourly=idx[subIdx]||0;
-  if(hourly===curHourly) return;
-  curHourly=hourly;
-  var p=profiles[hourly];
+  if(subIdx===curSub) return;
+  curSub=subIdx;
+  var p=profiles[subIdx];
   if(!p) return;
   // Move cursor line in heatmap (trace index 2)
   Plotly.restyle('mk-div',{{x:[[hd.x[subIdx],hd.x[subIdx]]]}},2);
   // Update column
-  Plotly.react('col-div',colTraces(p),colLayout(p,t_all[hourly]));
+  Plotly.react('col-div',colTraces(p),colLayout(p,hd.x[subIdx]));
 }});
 </script>
 </body></html>"""
