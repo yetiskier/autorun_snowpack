@@ -908,7 +908,7 @@ var lastP=PL.last;
 
 Plotly.newPlot('den-hm',[
   {{type:'heatmap',x:hd.x,y:hd.y,z:hd.z,
-    colorscale:'Greys_r',zmin:0,zmax:900,
+    colorscale:'Greys',reversescale:true,zmin:0,zmax:900,
     colorbar:{{title:'kg/m³',thickness:12}},
     hovertemplate:'%{{x}}<br>%{{y:.2f}} m  %{{z:.0f}} kg/m³<extra></extra>'}},
   {{type:'scatter',x:hd.x,y:hd.soil,mode:'lines',
