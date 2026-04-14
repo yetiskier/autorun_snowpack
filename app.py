@@ -338,7 +338,7 @@ for _i, _c in enumerate(_ALL_CODES):
 # ---------------------------------------------------------------------------
 # PRO parser (minimal, reused from visualize_pro.py)
 # ---------------------------------------------------------------------------
-_WANTED = {501, 502, 503, 506, 509, 510, 512, 513}  # 502=density, 506=LWC
+_WANTED = {501, 502, 503, 506, 509, 510, 512, 513, 515}  # 502=density, 506=LWC, 515=ice vol frac
 
 def _parse_pro(path: Path) -> dict:
     data, current, times, in_data = {c: [] for c in _WANTED}, {}, [], False
@@ -413,6 +413,7 @@ def _to_grid_stepfn(times, heights_list, values_list, depth_grid):
 
 @st.cache_data(show_spinner="Parsing PRO file…")
 def load_pro(pro_path_str: str, _mtime: float = 0.0) -> dict:
+    """Parse PRO file and build gridded arrays. v2 (adds ice frac + refreezing)"""
     path = Path(pro_path_str)
     pro  = _parse_pro(path)
     times = pd.DatetimeIndex(pro["times"])
@@ -426,6 +427,7 @@ def load_pro(pro_path_str: str, _mtime: float = 0.0) -> dict:
     MK_raw   = _to_grid_stepfn(times, pro[501], pro[513], depth_grid)
     Den_grid = _to_grid_stepfn(times, pro[501], pro[502], depth_grid)
     LWC_grid = _to_grid_stepfn(times, pro[501], pro[506], depth_grid)
+    Ice_grid = _to_grid_stepfn(times, pro[501], pro[515], depth_grid)  # % by volume
 
     # Map grain-type codes to index for colour scale
     MK_idx = np.full_like(MK_raw, np.nan)
@@ -435,21 +437,34 @@ def load_pro(pro_path_str: str, _mtime: float = 0.0) -> dict:
     # Mask below soil
     for ti, sd in enumerate(soil_depth_m):
         below = depth_grid > sd
-        MK_idx[ti, below]  = np.nan
-        MK_raw[ti, below]  = np.nan
-        Den_grid[ti, below] = np.nan
-        LWC_grid[ti, below] = np.nan
+        MK_idx[ti, below]   = np.nan
+        MK_raw[ti, below]   = np.nan
+        Den_grid[ti, below]  = np.nan
+        LWC_grid[ti, below]  = np.nan
+        Ice_grid[ti, below]  = np.nan
+
+    # Cumulative refreezing (mm w.e. = kg/m²)
+    # Positive step in ice fraction → water refroze in that cell.
+    # ice_vol_frac in %, depth_step in m, ice density 917 kg/m³.
+    depth_step = float(depth_grid[1] - depth_grid[0]) if len(depth_grid) > 1 else 0.05
+    dIce = np.diff(Ice_grid, axis=0)                       # (n_times-1, n_depth), % vol
+    refreezing_per_step = np.nansum(
+        np.where(dIce > 0, dIce, 0.0) / 100.0 * depth_step * 917.0,
+        axis=1,
+    )                                                       # kg/m² per timestep
+    cumul_refreezing = np.concatenate([[0.0], np.cumsum(refreezing_per_step)])
 
     return {
-        "times":        times,
-        "depth_grid":   depth_grid,
-        "soil_depth_m": soil_depth_m,
-        "T_grid":       T_grid,
-        "MK_raw":       MK_raw,
-        "MK_idx":       MK_idx,
-        "Den_grid":     Den_grid,
-        "LWC_grid":     LWC_grid,
-        "raw":          pro,          # raw per-timestep layer arrays
+        "times":             times,
+        "depth_grid":        depth_grid,
+        "soil_depth_m":      soil_depth_m,
+        "T_grid":            T_grid,
+        "MK_raw":            MK_raw,
+        "MK_idx":            MK_idx,
+        "Den_grid":          Den_grid,
+        "LWC_grid":          LWC_grid,
+        "cumul_refreezing":  cumul_refreezing,   # kg/m² = mm w.e., len = n_times
+        "raw":               pro,
     }
 
 
@@ -1004,6 +1019,28 @@ document.getElementById('den-hm').on('plotly_hover',function(data){{
         margin=dict(l=55, r=10, t=35, b=55),
     )
     st.plotly_chart(fig_lwc, width="stretch", key=f"lwc_chart_{sid}")
+
+    # ------------------------------------------------------------------ #
+    # Cumulative refreezing time series
+    # ------------------------------------------------------------------ #
+    cumul_rf = d["cumul_refreezing"]
+    fig_rf = go.Figure()
+    fig_rf.add_trace(go.Scatter(
+        x=t_dt, y=cumul_rf,
+        mode="lines",
+        line=dict(color="#2980b9", width=2),
+        fill="tozeroy",
+        fillcolor="rgba(41,128,185,0.15)",
+        hovertemplate="Date: %{x}<br>Cumulative refreezing: %{y:.1f} mm w.e.<extra></extra>",
+    ))
+    fig_rf.update_layout(
+        title=f"{sid} — Cumulative refreezing in firn column",
+        xaxis_title="Date",
+        yaxis=dict(title="mm w.e.  (kg m⁻²)", rangemode="tozero"),
+        height=280,
+        margin=dict(l=65, r=10, t=35, b=55),
+    )
+    st.plotly_chart(fig_rf, width="stretch", key=f"rf_chart_{sid}")
 
 
 # ---------------------------------------------------------------------------
