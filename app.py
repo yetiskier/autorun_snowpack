@@ -338,7 +338,7 @@ for _i, _c in enumerate(_ALL_CODES):
 # ---------------------------------------------------------------------------
 # PRO parser (minimal, reused from visualize_pro.py)
 # ---------------------------------------------------------------------------
-_WANTED = {501, 503, 506, 509, 510, 512, 513}
+_WANTED = {501, 502, 503, 506, 509, 510, 512, 513}  # 502=density, 506=LWC
 
 def _parse_pro(path: Path) -> dict:
     data, current, times, in_data = {c: [] for c in _WANTED}, {}, [], False
@@ -420,10 +420,12 @@ def load_pro(pro_path_str: str, _mtime: float = 0.0) -> dict:
     max_depth    = float(np.nanmax(soil_depth_m)) if len(soil_depth_m) else 30.0
     depth_grid   = np.arange(0, max_depth + 0.05, 0.05)
 
-    T_grid  = _to_grid(times, pro[501], pro[503], depth_grid)
+    T_grid   = _to_grid(times, pro[501], pro[503], depth_grid)
     # Step function: each depth cell gets the value of the element containing it,
     # preserving finite-element layer boundaries (no interpolation).
-    MK_raw  = _to_grid_stepfn(times, pro[501], pro[513], depth_grid)
+    MK_raw   = _to_grid_stepfn(times, pro[501], pro[513], depth_grid)
+    Den_grid = _to_grid_stepfn(times, pro[501], pro[502], depth_grid)
+    LWC_grid = _to_grid_stepfn(times, pro[501], pro[506], depth_grid)
 
     # Map grain-type codes to index for colour scale
     MK_idx = np.full_like(MK_raw, np.nan)
@@ -432,8 +434,11 @@ def load_pro(pro_path_str: str, _mtime: float = 0.0) -> dict:
 
     # Mask below soil
     for ti, sd in enumerate(soil_depth_m):
-        MK_idx[ti, depth_grid > sd] = np.nan
-        MK_raw[ti, depth_grid > sd] = np.nan
+        below = depth_grid > sd
+        MK_idx[ti, below]  = np.nan
+        MK_raw[ti, below]  = np.nan
+        Den_grid[ti, below] = np.nan
+        LWC_grid[ti, below] = np.nan
 
     return {
         "times":        times,
@@ -442,6 +447,8 @@ def load_pro(pro_path_str: str, _mtime: float = 0.0) -> dict:
         "T_grid":       T_grid,
         "MK_raw":       MK_raw,
         "MK_idx":       MK_idx,
+        "Den_grid":     Den_grid,
+        "LWC_grid":     LWC_grid,
         "raw":          pro,          # raw per-timestep layer arrays
     }
 
@@ -784,6 +791,56 @@ document.getElementById('mk-div').on('plotly_hover',function(data){{
             margin=dict(l=55, r=10, t=35, b=55),
         )
         st.plotly_chart(fig_obs, width="stretch", key=f"obs_T_chart_{sid}")
+
+    # ------------------------------------------------------------------ #
+    # Density heatmap
+    # ------------------------------------------------------------------ #
+    Den_grid = d["Den_grid"]
+    fig_den = go.Figure(go.Heatmap(
+        x=t_dt, y=depth_grid, z=Den_grid.T,
+        colorscale="Greys",
+        zmin=0, zmax=900,
+        colorbar=dict(title="kg m⁻³", thickness=12),
+        hovertemplate="Date: %{x}<br>Depth: %{y:.2f} m<br>Density: %{z:.0f} kg/m³<extra></extra>",
+    ))
+    fig_den.update_layout(
+        title=f"{sid} — Firn density",
+        yaxis=dict(title="Depth (m)", autorange="reversed"),
+        xaxis_title="Date", height=320,
+        margin=dict(l=55, r=10, t=35, b=55),
+    )
+    st.plotly_chart(fig_den, width="stretch", key=f"den_chart_{sid}")
+
+    # ------------------------------------------------------------------ #
+    # Liquid water content heatmap
+    # ------------------------------------------------------------------ #
+    # Custom colorscale: white→Blues for 0–10 %, red at the top (≥10 %)
+    _LWC_COLORSCALE = [
+        [0.00, "#ffffff"],
+        [0.01, "#f7fbff"],
+        [0.20, "#c6dbef"],
+        [0.50, "#6baed6"],
+        [0.80, "#2171b5"],
+        [0.99, "#08306b"],
+        [1.00, "red"],
+    ]
+    LWC_grid = d["LWC_grid"]
+    fig_lwc = go.Figure(go.Heatmap(
+        x=t_dt, y=depth_grid, z=LWC_grid.T,
+        colorscale=_LWC_COLORSCALE,
+        zmin=0, zmax=10,
+        colorbar=dict(title="LWC (%)", thickness=12,
+                      tickvals=[0, 2, 4, 6, 8, 10],
+                      ticktext=["0", "2", "4", "6", "8", "≥10"]),
+        hovertemplate="Date: %{x}<br>Depth: %{y:.2f} m<br>LWC: %{z:.2f}%<extra></extra>",
+    ))
+    fig_lwc.update_layout(
+        title=f"{sid} — Liquid water content (red ≥ 10%)",
+        yaxis=dict(title="Depth (m)", autorange="reversed"),
+        xaxis_title="Date", height=320,
+        margin=dict(l=55, r=10, t=35, b=55),
+    )
+    st.plotly_chart(fig_lwc, width="stretch", key=f"lwc_chart_{sid}")
 
 
 # ---------------------------------------------------------------------------
