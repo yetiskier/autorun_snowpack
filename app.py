@@ -528,6 +528,84 @@ def _profile_for_timestep(raw: dict, ti: int) -> dict | None:
     }
 
 
+def _density_profile_for_timestep(raw: dict, ti: int) -> dict | None:
+    """Return step-function x/y arrays for a density-vs-depth profile."""
+    heights = raw[501][ti]
+    density = raw[502][ti]
+    n = min(len(heights), len(density))
+    if n < 2:
+        return None
+    heights = heights[:n]; density = density[:n]
+    order   = np.argsort(heights)
+    heights = heights[order]; density = density[order]
+    surface  = float(heights[-1])
+    dtop     = (surface - heights) / 100.0
+    hbase    = np.empty_like(heights)
+    hbase[1:] = heights[:-1]
+    hbase[0]  = heights[0] - (heights[1] - heights[0])
+    dbot      = (surface - hbase) / 100.0
+    # Build step-function: vertical segment per layer + horizontal jump at boundary
+    xs: list[float] = []
+    ys: list[float] = []
+    for j in range(n):
+        xs.extend([round(float(density[j]), 1), round(float(density[j]), 1)])
+        ys.extend([round(float(dtop[j]), 4),    round(float(dbot[j]), 4)])
+        if j < n - 1:
+            xs.append(round(float(density[j + 1]), 1))
+            ys.append(round(float(dbot[j]), 4))
+    return {"x": xs, "y": ys}
+
+
+@st.cache_data(show_spinner="Preparing density data…")
+def _build_density_payload(pro_path_str: str, _mtime: float = 0.0) -> str:
+    """JSON payload for the density heatmap + hover profiles component."""
+    d   = load_pro(pro_path_str, _mtime=_mtime)
+    raw = d["raw"]
+    times      = d["times"]
+    depth_grid = d["depth_grid"]
+    Den_grid   = d["Den_grid"]
+    soil_depth = d["soil_depth_m"]
+
+    n_times = len(times)
+    step = max(1, n_times // 365)
+    idx  = list(range(0, n_times, step))
+
+    t_labels  = [str(times[i])[:16] for i in idx]
+    den_sub   = Den_grid[idx]
+    soil_sub  = [round(float(v), 3) for v in soil_depth[idx]]
+    depth_list = [round(float(v), 4) for v in depth_grid]
+
+    def _mat(arr):
+        out = []
+        for di in range(arr.shape[1]):
+            row = []
+            for ti in range(arr.shape[0]):
+                v = arr[ti, di]
+                row.append(None if math.isnan(v) else round(float(v), 1))
+            out.append(row)
+        return out
+
+    profiles = [_density_profile_for_timestep(raw, ti) for ti in idx]
+    first_p  = _density_profile_for_timestep(raw, 0)
+    last_p   = _density_profile_for_timestep(raw, n_times - 1)
+
+    payload = {
+        "heatmap": {
+            "x":        t_labels,
+            "y":        depth_list,
+            "z":        _mat(den_sub),
+            "soil":     soil_sub,
+            "maxDepth": float(depth_grid.max()),
+        },
+        "profiles": profiles,
+        "first":    first_p,
+        "last":     last_p,
+        "t_first":  str(times[0])[:16],
+        "t_last":   str(times[-1])[:16],
+    }
+    return json.dumps(payload, allow_nan=False)
+
+
 @st.cache_data(show_spinner="Preparing hover data…")
 def _build_hover_payload(pro_path_str: str, _mtime: float = 0.0) -> str:
     """Return JSON string with downsampled heatmap + all column profiles.
@@ -793,23 +871,99 @@ document.getElementById('mk-div').on('plotly_hover',function(data){{
         st.plotly_chart(fig_obs, width="stretch", key=f"obs_T_chart_{sid}")
 
     # ------------------------------------------------------------------ #
-    # Density heatmap
+    # Density heatmap + hover profile (self-contained HTML component)
     # ------------------------------------------------------------------ #
-    Den_grid = d["Den_grid"]
-    fig_den = go.Figure(go.Heatmap(
-        x=t_dt, y=depth_grid, z=Den_grid.T,
-        colorscale="Greys",
-        zmin=0, zmax=900,
-        colorbar=dict(title="kg m⁻³", thickness=12),
-        hovertemplate="Date: %{x}<br>Depth: %{y:.2f} m<br>Density: %{z:.0f} kg/m³<extra></extra>",
-    ))
-    fig_den.update_layout(
-        title=f"{sid} — Firn density",
-        yaxis=dict(title="Depth (m)", autorange="reversed"),
-        xaxis_title="Date", height=320,
-        margin=dict(l=55, r=10, t=35, b=55),
-    )
-    st.plotly_chart(fig_den, width="stretch", key=f"den_chart_{sid}")
+    den_payload = _build_density_payload(str(pro_path), _mtime=mtime)
+    sid_safe    = sid.replace("'", "\\'")
+    den_html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:transparent;font-family:sans-serif;overflow:hidden}}
+#wrap{{display:flex;width:100%;height:500px;gap:4px}}
+#den-hm{{flex:3;min-width:0}}
+#den-prof{{flex:1;min-width:0}}
+</style>
+</head>
+<body>
+<div id="wrap"><div id="den-hm"></div><div id="den-prof"></div></div>
+<script>
+var PL={den_payload};
+var hd=PL.heatmap;
+var profiles=PL.profiles;
+var firstP=PL.first;
+var lastP=PL.last;
+
+Plotly.newPlot('den-hm',[
+  {{type:'heatmap',x:hd.x,y:hd.y,z:hd.z,
+    colorscale:'Greys',zmin:0,zmax:900,
+    colorbar:{{title:'kg/m³',thickness:12}},
+    hovertemplate:'%{{x}}<br>%{{y:.2f}} m  %{{z:.0f}} kg/m³<extra></extra>'}},
+  {{type:'scatter',x:hd.x,y:hd.soil,mode:'lines',
+    line:{{color:'black',width:1.5}},hoverinfo:'skip',showlegend:false}},
+  {{type:'scatter',x:[hd.x[0],hd.x[0]],y:[0,hd.maxDepth],mode:'lines',
+    line:{{color:'#e74c3c',width:2,dash:'dot'}},hoverinfo:'skip',showlegend:false}}
+],{{
+  title:{{text:'{sid_safe} — Firn density (hover for profile)',font:{{size:13}}}},
+  yaxis:{{title:'Depth (m)',autorange:'reversed'}},
+  xaxis:{{title:'Date'}},
+  height:500,margin:{{l:60,r:10,t:40,b:55}},
+  plot_bgcolor:'white'
+}},{{responsive:true,displayModeBar:false}});
+
+function profTraces(p,label){{
+  var traces=[];
+  if(firstP) traces.push({{
+    type:'scatter',x:firstP.x,y:firstP.y,mode:'lines',
+    name:PL.t_first,
+    line:{{color:'#aaaaaa',width:1.5,dash:'dash'}},
+    hovertemplate:'%{{x:.0f}} kg/m³ @ %{{y:.2f}} m<extra>first</extra>'
+  }});
+  if(lastP) traces.push({{
+    type:'scatter',x:lastP.x,y:lastP.y,mode:'lines',
+    name:PL.t_last,
+    line:{{color:'#e67e22',width:1.5,dash:'dash'}},
+    hovertemplate:'%{{x:.0f}} kg/m³ @ %{{y:.2f}} m<extra>last</extra>'
+  }});
+  if(p) traces.push({{
+    type:'scatter',x:p.x,y:p.y,mode:'lines',
+    name:label||'',
+    line:{{color:'#2c3e50',width:2}},
+    hovertemplate:'%{{x:.0f}} kg/m³ @ %{{y:.2f}} m<extra>hover</extra>'
+  }});
+  return traces;
+}}
+var profLayout={{
+  xaxis:{{title:'Density (kg/m³)',range:[200,920]}},
+  yaxis:{{title:'Depth (m)',autorange:'reversed'}},
+  legend:{{x:0,y:-0.12,orientation:'h',font:{{size:9}}}},
+  height:500,margin:{{l:55,r:10,t:40,b:75}},
+  plot_bgcolor:'white'
+}};
+
+var p0=null,i0=0;
+for(var i=0;i<profiles.length;i++){{if(profiles[i]){{p0=profiles[i];i0=i;break;}}}}
+if(p0) Plotly.newPlot('den-prof',profTraces(p0,hd.x[i0]),profLayout,
+                      {{responsive:true,displayModeBar:false}});
+
+var curSub=-1;
+document.getElementById('den-hm').on('plotly_hover',function(data){{
+  if(!data||!data.points||!data.points.length) return;
+  var pt=data.points[0];
+  var subIdx=Array.isArray(pt.pointIndex)?pt.pointIndex[1]:0;
+  if(subIdx===curSub) return;
+  curSub=subIdx;
+  var p=profiles[subIdx];
+  if(!p) return;
+  Plotly.restyle('den-hm',{{x:[[hd.x[subIdx],hd.x[subIdx]]]}},2);
+  Plotly.react('den-prof',profTraces(p,hd.x[subIdx]),profLayout);
+}});
+</script>
+</body></html>"""
+    components.html(den_html, height=520, scrolling=False)
 
     # ------------------------------------------------------------------ #
     # Liquid water content heatmap
