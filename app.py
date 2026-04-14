@@ -567,7 +567,7 @@ def _density_profile_for_timestep(raw: dict, ti: int, smooth_cm: float = 50.0) -
 
 @st.cache_data(show_spinner="Preparing density data…")
 def _build_density_payload(pro_path_str: str, _mtime: float = 0.0) -> str:
-    """JSON payload for the density heatmap + hover profiles component."""
+    """JSON payload for the density heatmap + hover profiles component. v2-smooth"""
     d   = load_pro(pro_path_str, _mtime=_mtime)
     raw = d["raw"]
     times      = d["times"]
