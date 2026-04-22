@@ -1388,105 +1388,105 @@ with tab_settings:
         doc = load_settings()
 
         with st.form("settings_form"):
-            st.markdown("**Paths**")
-            c1, c2 = st.columns(2)
-            doc["paths"]["snowpack_exe"] = c1.text_input(
-                "SNOWPACK executable", value=str(doc["paths"]["snowpack_exe"]))
-            doc["paths"]["data_root"] = c2.text_input(
-                "Data root (blank = auto)", value=str(doc["paths"].get("data_root", "")))
 
-            st.markdown("**Run**")
-            c1, c2, c3 = st.columns(3)
-            doc["run"]["run_until"] = c1.text_input(
-                "Default run_until (blank = full record)",
-                value=str(doc["run"].get("run_until", "")))
-            doc["run"]["keep_last_n_sno"] = c2.number_input(
-                "Keep last N .sno files", value=int(doc["run"]["keep_last_n_sno"]),
-                min_value=1, step=1)
-            _wt_options = ["adaptive", "BUCKET", "RICHARDSEQUATION"]
-            _wt_current = str(doc["run"].get("water_transport", "adaptive"))
-            doc["run"]["water_transport"] = c3.selectbox(
-                "Water transport",
-                options=_wt_options,
-                index=_wt_options.index(_wt_current) if _wt_current in _wt_options else 0)
-            c1, c2, c3 = st.columns(3)
-            doc["run"]["assimilation_interval_h"] = c1.number_input(
-                "Assimilation interval (hours)",
-                value=int(doc["run"].get("assimilation_interval_h", 1)),
-                min_value=1, max_value=24, step=1,
-                help="Hours between temperature assimilation steps. Higher = faster runs, less frequent nudging.")
-            doc["run"]["use_ramdisk"] = c2.checkbox(
-                "RAM disk (/dev/shm)",
-                value=bool(doc["run"].get("use_ramdisk", False)),
-                help="Run .sno and config files from RAM for faster I/O. Output .pro stays on disk.")
-            doc["run"]["keep_hourly_archives"] = c3.checkbox(
-                "Keep hourly .sno archives",
-                value=bool(doc["run"]["keep_hourly_archives"]))
+            with st.expander("Paths", expanded=False):
+                c1, c2 = st.columns(2)
+                doc["paths"]["snowpack_exe"] = c1.text_input(
+                    "SNOWPACK executable", value=str(doc["paths"]["snowpack_exe"]))
+                doc["paths"]["data_root"] = c2.text_input(
+                    "Data root (blank = auto)", value=str(doc["paths"].get("data_root", "")))
 
-            st.markdown("**Model**")
-            c1, c2, c3 = st.columns(3)
-            doc["model"]["calculation_step_length_min"] = c1.number_input(
-                "Step length (min)", value=float(doc["model"]["calculation_step_length_min"]),
-                step=1.0)
-            doc["model"]["alpha"] = c2.number_input(
-                "Assimilation alpha", value=float(doc["model"]["alpha"]),
-                step=0.01, format="%.2f")
-            doc["model"]["default_elevation_m"] = c3.number_input(
-                "Default elevation (m)", value=float(doc["model"]["default_elevation_m"]),
-                step=10.0)
+            with st.expander("Run", expanded=True):
+                c1, c2, c3 = st.columns(3)
+                doc["run"]["run_until"] = c1.text_input(
+                    "Stop at (blank = full record)",
+                    value=str(doc["run"].get("run_until", "")))
+                _wt_options = ["adaptive", "BUCKET", "RICHARDSEQUATION"]
+                _wt_current = str(doc["run"].get("water_transport", "adaptive"))
+                doc["run"]["water_transport"] = c2.selectbox(
+                    "Water transport",
+                    options=_wt_options,
+                    index=_wt_options.index(_wt_current) if _wt_current in _wt_options else 0)
+                doc["run"]["assimilation_interval_h"] = c3.number_input(
+                    "Assimilation interval (hours)",
+                    value=int(doc["run"].get("assimilation_interval_h", 1)),
+                    min_value=1, max_value=24, step=1,
+                    help="Hours between temperature assimilation steps. Higher = faster runs, less frequent nudging.")
+                c1, c2, c3, c4 = st.columns(4)
+                doc["run"]["keep_last_n_sno"] = c1.number_input(
+                    "Keep last N .sno", value=int(doc["run"]["keep_last_n_sno"]),
+                    min_value=1, step=1)
+                doc["run"]["use_ramdisk"] = c2.checkbox(
+                    "RAM disk (/dev/shm)",
+                    value=bool(doc["run"].get("use_ramdisk", False)),
+                    help="Run .sno and config files from RAM for faster I/O. Output .pro stays on disk.")
+                doc["run"]["keep_hourly_archives"] = c3.checkbox(
+                    "Keep hourly .sno archives",
+                    value=bool(doc["run"]["keep_hourly_archives"]))
 
-            st.markdown("**Assimilation safeguards**")
-            c1, c2, c3, c4 = st.columns(4)
-            doc["assimilation"]["temp_min_c"] = c1.number_input(
-                "T min (°C)", value=float(doc["assimilation"]["temp_min_c"]), step=1.0)
-            doc["assimilation"]["temp_max_c"] = c2.number_input(
-                "T max (°C)", value=float(doc["assimilation"]["temp_max_c"]), step=1.0)
-            doc["assimilation"]["max_adjust_per_hour_c"] = c3.number_input(
-                "Max adjust/hr (°C)", value=float(doc["assimilation"]["max_adjust_per_hour_c"]),
-                step=0.01, format="%.2f")
-            doc["assimilation"]["min_obs_for_adjust"] = c4.number_input(
-                "Min obs for adjust", value=int(doc["assimilation"]["min_obs_for_adjust"]),
-                step=1)
+            with st.expander("Model & assimilation", expanded=False):
+                c1, c2, c3 = st.columns(3)
+                doc["model"]["calculation_step_length_min"] = c1.number_input(
+                    "Step length (min)", value=float(doc["model"]["calculation_step_length_min"]),
+                    step=1.0)
+                doc["model"]["alpha"] = c2.number_input(
+                    "Assimilation alpha", value=float(doc["model"]["alpha"]),
+                    step=0.01, format="%.2f")
+                doc["model"]["default_elevation_m"] = c3.number_input(
+                    "Default elevation (m)", value=float(doc["model"]["default_elevation_m"]),
+                    step=10.0)
+                c1, c2, c3, c4 = st.columns(4)
+                doc["assimilation"]["temp_min_c"] = c1.number_input(
+                    "T min (°C)", value=float(doc["assimilation"]["temp_min_c"]), step=1.0)
+                doc["assimilation"]["temp_max_c"] = c2.number_input(
+                    "T max (°C)", value=float(doc["assimilation"]["temp_max_c"]), step=1.0)
+                doc["assimilation"]["max_adjust_per_hour_c"] = c3.number_input(
+                    "Max adjust/hr (°C)", value=float(doc["assimilation"]["max_adjust_per_hour_c"]),
+                    step=0.01, format="%.2f")
+                doc["assimilation"]["min_obs_for_adjust"] = c4.number_input(
+                    "Min obs for adjust", value=int(doc["assimilation"]["min_obs_for_adjust"]),
+                    step=1)
 
-            st.markdown("**Basal boundary**")
-            c1, c2, c3 = st.columns(3)
-            doc["basal"]["tsg_mode"] = c1.selectbox(
-                "TSG mode",
-                options=["profile_gradient", "zero", "soil_temp"],
-                index=["profile_gradient", "zero", "soil_temp"].index(
-                    str(doc["basal"]["tsg_mode"])))
-            doc["basal"]["tsg_lookback_m"] = c2.number_input(
-                "TSG lookback (m)", value=float(doc["basal"]["tsg_lookback_m"]), step=0.5)
-            doc["basal"]["basal_temp_min_c"] = c3.number_input(
-                "Basal T min (°C)", value=float(doc["basal"]["basal_temp_min_c"]), step=1.0)
+            with st.expander("Basal boundary", expanded=False):
+                c1, c2, c3 = st.columns(3)
+                doc["basal"]["tsg_mode"] = c1.selectbox(
+                    "TSG mode",
+                    options=["profile_gradient", "zero", "soil_temp"],
+                    index=["profile_gradient", "zero", "soil_temp"].index(
+                        str(doc["basal"]["tsg_mode"])))
+                doc["basal"]["tsg_lookback_m"] = c2.number_input(
+                    "TSG lookback (m)", value=float(doc["basal"]["tsg_lookback_m"]), step=0.5)
+                doc["basal"]["basal_temp_min_c"] = c3.number_input(
+                    "Basal T min (°C)", value=float(doc["basal"]["basal_temp_min_c"]), step=1.0)
 
-            st.markdown("**ERA5 forcing adjustments** — applied via SMET `units_multiplier` / `units_offset`; physical = ERA5 × multiplier + offset")
-            if "forcing_adjustments" not in doc:
-                doc.add("forcing_adjustments", tomlkit.table())
-            fa = doc["forcing_adjustments"]
-            _fa_vars = [
-                ("ta",   "Air temp (°C)",      "TA"),
-                ("rh",   "Rel. humidity (–)",  "RH"),
-                ("vw",   "Wind speed (m/s)",   "VW"),
-                ("iswr", "Shortwave (W m⁻²)",  "ISWR"),
-                ("ilwr", "Longwave (W m⁻²)",   "ILWR"),
-                ("psum", "Precipitation (mm)", "PSUM"),
-            ]
-            _hdr = st.columns([2, 1, 1])
-            _hdr[0].markdown("Variable")
-            _hdr[1].markdown("Multiplier")
-            _hdr[2].markdown("Offset")
-            for _key, _label, _field in _fa_vars:
-                _c0, _c1, _c2 = st.columns([2, 1, 1])
-                _c0.markdown(_label)
-                fa[f"{_key}_multiplier"] = _c1.number_input(
-                    f"{_field} ×", label_visibility="collapsed",
-                    value=float(fa.get(f"{_key}_multiplier", 1.0)),
-                    step=0.05, format="%.3f", key=f"fa_{_key}_mult")
-                fa[f"{_key}_offset"] = _c2.number_input(
-                    f"{_field} +", label_visibility="collapsed",
-                    value=float(fa.get(f"{_key}_offset", 0.0)),
-                    step=0.1, format="%.3f", key=f"fa_{_key}_off")
+            with st.expander("ERA5 forcing adjustments", expanded=False):
+                st.caption("physical = ERA5 × multiplier + offset  (applied via SMET `units_multiplier` / `units_offset`)")
+                if "forcing_adjustments" not in doc:
+                    doc.add("forcing_adjustments", tomlkit.table())
+                fa = doc["forcing_adjustments"]
+                _fa_vars = [
+                    ("ta",   "Air temp (°C)",      "TA"),
+                    ("rh",   "Rel. humidity (–)",  "RH"),
+                    ("vw",   "Wind speed (m/s)",   "VW"),
+                    ("iswr", "Shortwave (W m⁻²)",  "ISWR"),
+                    ("ilwr", "Longwave (W m⁻²)",   "ILWR"),
+                    ("psum", "Precipitation (mm)", "PSUM"),
+                ]
+                _hdr = st.columns([2, 1, 1])
+                _hdr[0].markdown("Variable")
+                _hdr[1].markdown("Multiplier")
+                _hdr[2].markdown("Offset")
+                for _key, _label, _field in _fa_vars:
+                    _c0, _c1, _c2 = st.columns([2, 1, 1])
+                    _c0.markdown(_label)
+                    fa[f"{_key}_multiplier"] = _c1.number_input(
+                        f"{_field} ×", label_visibility="collapsed",
+                        value=float(fa.get(f"{_key}_multiplier", 1.0)),
+                        step=0.05, format="%.3f", key=f"fa_{_key}_mult")
+                    fa[f"{_key}_offset"] = _c2.number_input(
+                        f"{_field} +", label_visibility="collapsed",
+                        value=float(fa.get(f"{_key}_offset", 0.0)),
+                        step=0.1, format="%.3f", key=f"fa_{_key}_off")
 
             saved = st.form_submit_button("💾 Save settings", type="primary")
 
