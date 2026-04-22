@@ -275,7 +275,6 @@ def get_pro_current_time(sid: str) -> "pd.Timestamp | None":
     return None
 
 
-@st.cache_data(show_spinner=False)
 def get_expected_date_range(sid: str) -> "tuple[pd.Timestamp | None, pd.Timestamp | None]":
     """Return (start, end) dates from the Tempconcatenated CSV for this sid."""
     csv = TEMP_DIR / f"{sid}_Tempconcatenated.csv"
