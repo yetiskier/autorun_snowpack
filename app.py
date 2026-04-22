@@ -155,25 +155,19 @@ def is_running(sid: str) -> bool:
     if pid is not None:
         return True
 
-    # Fallback: check if autorun_snowpack.py is running with this site's workdir
-    # (catches runs launched from the terminal without a PID file)
-    work_dir = str(project_dir(sid))
+    # Fallback: scan /proc/*/cwd for any process running inside this site's
+    # project directory (catches runs launched from the terminal without a PID file).
+    work_dir = str(project_dir(sid).resolve())
     try:
-        import subprocess
-        out = subprocess.check_output(
-            ["pgrep", "-f", f"autorun_snowpack.*{sid}"],
-            stderr=subprocess.DEVNULL, text=True
-        ).strip()
-        if out:
-            return True
-        # Also check if a snowpack process is running inside this workdir
-        out2 = subprocess.check_output(
-            ["pgrep", "-f", f"snowpack.*{work_dir}"],
-            stderr=subprocess.DEVNULL, text=True
-        ).strip()
-        return bool(out2)
-    except subprocess.CalledProcessError:
-        return False
+        for cwd_link in Path("/proc").glob("*/cwd"):
+            try:
+                if str(cwd_link.resolve()) == work_dir:
+                    return True
+            except (PermissionError, OSError):
+                continue
+    except Exception:
+        pass
+    return False
 
 
 def kill_run(sid: str) -> None:
