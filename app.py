@@ -1308,32 +1308,31 @@ with tab_run:
         use_custom = st.checkbox("Enter site manually", value=not bool(available_cores))
 
         if not use_custom and available_cores:
-            # Build group radio options based on what exists
-            _group_options = ["All cores"]
-            if cores_incomplete:
-                _group_options.insert(0, "Incomplete / crashed")
-            if cores_running:
-                _group_options.insert(0, "In progress")
+            _group_options = [
+                f"All cores ({len(cores_all)})",
+                f"Incomplete / crashed ({len(cores_incomplete)})",
+                f"In progress ({len(cores_running)})",
+            ]
+            _group = st.radio("", _group_options, horizontal=True,
+                              index=0, key="core_group_radio",
+                              label_visibility="collapsed")
 
-            if len(_group_options) > 1:
-                _group = st.radio("", _group_options, horizontal=True,
-                                  index=_group_options.index("All cores"),
-                                  key="core_group_radio", label_visibility="collapsed")
-            else:
-                _group = "All cores"
-
-            if _group == "In progress":
+            if "In progress" in _group:
                 _pool = cores_running
-            elif _group == "Incomplete / crashed":
+            elif "Incomplete" in _group:
                 _pool = cores_incomplete
             else:
                 _pool = cores_all
 
-            _pool_labels = [_label(*c) for c in _pool]
-            chosen_label = st.selectbox("Core", _pool_labels,
-                                        label_visibility="collapsed")
-            idx = _pool_labels.index(chosen_label)
-            year, site, depth = _pool[idx][:3]
+            if not _pool:
+                st.info("No cores in this category.")
+                year, site, depth = cores_all[0][:3] if cores_all else (2022, "T3", 25)
+            else:
+                _pool_labels = [_label(*c) for c in _pool]
+                chosen_label = st.selectbox("Core", _pool_labels,
+                                            label_visibility="collapsed")
+                idx = _pool_labels.index(chosen_label)
+                year, site, depth = _pool[idx][:3]
 
         else:
             if not available_cores:
