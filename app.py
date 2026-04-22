@@ -1290,19 +1290,20 @@ with tab_run:
             return f"{y} · {s} · {d} m    {d0} → {d1}"
 
         def _core_status(y, s, d):
-            """Return 'running', 'incomplete', or 'fresh'."""
+            """Return 'running', 'incomplete', 'complete', or 'fresh'."""
             sid_ = site_id(y, s, d)
             if is_running(sid_):
                 return "running"
             if find_pro_file(sid_) is not None:
                 t_cur = get_pro_current_time(sid_)
                 _, t_end_ = get_expected_date_range(sid_)
-                if t_cur is not None and t_end_ is not None and t_cur < t_end_:
-                    return "incomplete"
+                if t_cur is not None and t_end_ is not None:
+                    return "incomplete" if t_cur < t_end_ else "complete"
             return "fresh"
 
         cores_running    = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _core_status(y, s, d) == "running"]
         cores_incomplete = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _core_status(y, s, d) == "incomplete"]
+        cores_complete   = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _core_status(y, s, d) == "complete"]
         cores_all        = available_cores  # all cores for a fresh / re-run
 
         use_custom = st.checkbox("Enter site manually", value=not bool(available_cores))
@@ -1310,6 +1311,7 @@ with tab_run:
         if not use_custom and available_cores:
             _group_options = [
                 f"All cores ({len(cores_all)})",
+                f"Completed ({len(cores_complete)})",
                 f"Incomplete / crashed ({len(cores_incomplete)})",
                 f"In progress ({len(cores_running)})",
             ]
@@ -1321,6 +1323,8 @@ with tab_run:
                 _pool = cores_running
             elif "Incomplete" in _group:
                 _pool = cores_incomplete
+            elif "Completed" in _group:
+                _pool = cores_complete
             else:
                 _pool = cores_all
 
