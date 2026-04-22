@@ -1,6 +1,7 @@
 # Data and per-site run directories (all auto-generated)
 AllCoreDataCommonFormat/
 ????_*_[0-9]*m/
+????_*_[0-9]*m_*/
 
 # Stray figures at repo root
 *.png
