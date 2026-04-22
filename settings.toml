@@ -21,6 +21,8 @@ keep_last_n_sno = 3
 water_transport = "BUCKET"
 # Hours between temperature assimilation steps (1 = every hour, 6 = every 6 h, etc.)
 assimilation_interval_h = 1
+# Run working files (SNO, cfgfiles, current_snow) from /dev/shm RAM disk for faster I/O
+use_ramdisk = false
 
 [model]
 calculation_step_length_min = 15.0

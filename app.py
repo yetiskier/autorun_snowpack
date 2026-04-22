@@ -1409,13 +1409,17 @@ with tab_settings:
                 "Water transport",
                 options=_wt_options,
                 index=_wt_options.index(_wt_current) if _wt_current in _wt_options else 0)
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             doc["run"]["assimilation_interval_h"] = c1.number_input(
                 "Assimilation interval (hours)",
                 value=int(doc["run"].get("assimilation_interval_h", 1)),
                 min_value=1, max_value=24, step=1,
                 help="Hours between temperature assimilation steps. Higher = faster runs, less frequent nudging.")
-            doc["run"]["keep_hourly_archives"] = c2.checkbox(
+            doc["run"]["use_ramdisk"] = c2.checkbox(
+                "RAM disk (/dev/shm)",
+                value=bool(doc["run"].get("use_ramdisk", False)),
+                help="Run .sno and config files from RAM for faster I/O. Output .pro stays on disk.")
+            doc["run"]["keep_hourly_archives"] = c3.checkbox(
                 "Keep hourly .sno archives",
                 value=bool(doc["run"]["keep_hourly_archives"]))
 

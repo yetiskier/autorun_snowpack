@@ -130,6 +130,8 @@ WET_LAYER_DRAIN_THRESHOLD_C : float
 
 WATER_TRANSPORT          : str
 ASSIMILATION_INTERVAL_H  : int
+USE_RAMDISK              : bool
+DISK_INPUT_DIR           : Path   # real disk path used for checkpoint sync
 
 FORCING_TA_MULT   : float
 FORCING_TA_ADD    : float
@@ -191,6 +193,43 @@ def load_settings(args: argparse.Namespace) -> dict:
         return tomllib.load(fh)
 
 
+def _setup_ramdisk(site_id: str, disk_project_dir: Path) -> Path:
+    """Mirror hot working files to /dev/shm; symlink large static files to disk."""
+    ram_dir = Path(f"/dev/shm/snowpack_{site_id}")
+    ram_dir.mkdir(exist_ok=True)
+
+    for sub in ("input", "cfgfiles", "current_snow"):
+        (ram_dir / sub).mkdir(exist_ok=True)
+
+    # Large sequential-write output stays on disk
+    for sub in ("output", "era_tmp", "cache"):
+        link = ram_dir / sub
+        if not link.exists():
+            link.symlink_to(disk_project_dir / sub)
+
+    # SMET is large and read-only — symlink to disk
+    ram_smet = ram_dir / "input" / "site_forcing.smet"
+    disk_smet = disk_project_dir / "input" / "site_forcing.smet"
+    if not ram_smet.exists() and disk_smet.exists():
+        ram_smet.symlink_to(disk_smet)
+
+    # Copy checkpoint SNO to RAM if it exists
+    disk_sno = disk_project_dir / "input" / "initial_profile.sno"
+    ram_sno  = ram_dir / "input" / "initial_profile.sno"
+    if disk_sno.exists() and not ram_sno.exists():
+        shutil.copy2(disk_sno, ram_sno)
+
+    # Copy current_snow files to RAM
+    disk_cs = disk_project_dir / "current_snow"
+    if disk_cs.exists():
+        for f in disk_cs.iterdir():
+            dst = ram_dir / "current_snow" / f.name
+            if not dst.exists():
+                shutil.copy2(f, dst)
+
+    return ram_dir
+
+
 def configure(args: argparse.Namespace, cfg: dict) -> None:
     """Populate all module-level globals from CLI args + settings.toml."""
     global PROJECT_DIR, DATA_DIR
@@ -212,7 +251,7 @@ def configure(args: argparse.Namespace, cfg: dict) -> None:
     global ADD_BASAL_LAYERS, BASAL_LAYER_THICKNESSES_M, BASAL_TREND_LOOKBACK_M, BASAL_TEMP_MIN_C
     global TEMP_MIN_C, TEMP_MAX_C, MAX_ADJUST_PER_HOUR_C, MIN_OBS_FOR_ADJUST, ASSIMILATION_INTERVAL_H
     global WET_LAYER_DRAIN_THRESHOLD_C
-    global WATER_TRANSPORT
+    global WATER_TRANSPORT, USE_RAMDISK, DISK_INPUT_DIR
     global FORCING_TA_MULT, FORCING_TA_ADD, FORCING_RH_MULT, FORCING_RH_ADD
     global FORCING_VW_MULT, FORCING_VW_ADD, FORCING_ISWR_MULT, FORCING_ISWR_ADD
     global FORCING_ILWR_MULT, FORCING_ILWR_ADD, FORCING_PSUM_MULT, FORCING_PSUM_ADD
@@ -323,6 +362,19 @@ def configure(args: argparse.Namespace, cfg: dict) -> None:
     KEEP_LAST_N_SNO         = int(cfg["run"]["keep_last_n_sno"])
     WATER_TRANSPORT         = str(cfg["run"].get("water_transport", "adaptive"))
     ASSIMILATION_INTERVAL_H = int(cfg["run"].get("assimilation_interval_h", 1))
+    USE_RAMDISK             = bool(cfg["run"].get("use_ramdisk", False))
+
+    DISK_INPUT_DIR = INPUT_DIR  # save real disk path before any ramdisk redirect
+
+    if USE_RAMDISK:
+        ram_dir = _setup_ramdisk(project_id, PROJECT_DIR)
+        PROJECT_DIR      = ram_dir
+        INPUT_DIR        = ram_dir / "input"
+        CFG_DIR          = ram_dir / "cfgfiles"
+        CURRENT_SNOW_DIR = ram_dir / "current_snow"
+        INITIAL_SNO_FILE = INPUT_DIR / "initial_profile.sno"
+        CFG_INI_FILE     = CFG_DIR  / "site_run.ini"
+        print(f"RAM disk active: {ram_dir}")
 
     print(f"Site:        {site_id}")
     print(f"Project dir: {PROJECT_DIR}")
@@ -2918,6 +2970,10 @@ def cycle_hourly_snowpack_with_moving_profile(
 
         if not same_file:
             shutil.copy2(latest_sno, latest_sno_backup)
+
+        # Sync checkpoint SNO back to disk so a crash doesn't lose progress
+        if USE_RAMDISK and input_sno_file != DISK_INPUT_DIR / input_sno_file.name:
+            shutil.copy2(input_sno_file, DISK_INPUT_DIR / input_sno_file.name)
 
 
 # =============================================================================
