@@ -58,17 +58,16 @@ _SITE_RE = re.compile(r"^(\d{4})_(.+?)_(\d+)m_Tempconcatenated\.csv$")
 
 def _temp_date_range(path: Path) -> tuple[str, str]:
     """Read the first and last timestamp from a Tempconcatenated CSV.
-    The file has 4 header lines; timestamps are in column 0."""
+    Skips all non-date header rows by requiring the first column to start
+    with a digit (timestamps are YYYY-MM-DD ...)."""
     first = last = ""
     with open(path, errors="replace") as fh:
-        for _ in range(4):          # skip 3 metadata rows + column-header row
-            fh.readline()
         for line in fh:
             ts = line.split(",", 1)[0].strip()
-            if not ts:
+            if not ts or not ts[0].isdigit():
                 continue
             if not first:
-                first = ts[:10]     # keep date part only (YYYY-MM-DD)
+                first = ts[:10]
             last = ts[:10]
     return first, last
 
@@ -135,27 +134,46 @@ def clear_pid(sid: str) -> None:
 
 def is_running(sid: str) -> bool:
     pid = read_pid(sid)
-    if pid is None:
-        return False
+    if pid is not None:
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            clear_pid(sid)
+            pid = None
+        else:
+            try:
+                for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+                    if line.startswith("State:"):
+                        if "Z" in line:
+                            clear_pid(sid)
+                            pid = None
+                        break
+            except OSError:
+                clear_pid(sid)
+                pid = None
+
+    if pid is not None:
+        return True
+
+    # Fallback: check if autorun_snowpack.py is running with this site's workdir
+    # (catches runs launched from the terminal without a PID file)
+    work_dir = str(project_dir(sid))
     try:
-        os.kill(pid, 0)   # signal 0 = existence check
-    except (ProcessLookupError, PermissionError):
-        clear_pid(sid)
+        import subprocess
+        out = subprocess.check_output(
+            ["pgrep", "-f", f"autorun_snowpack.*{sid}"],
+            stderr=subprocess.DEVNULL, text=True
+        ).strip()
+        if out:
+            return True
+        # Also check if a snowpack process is running inside this workdir
+        out2 = subprocess.check_output(
+            ["pgrep", "-f", f"snowpack.*{work_dir}"],
+            stderr=subprocess.DEVNULL, text=True
+        ).strip()
+        return bool(out2)
+    except subprocess.CalledProcessError:
         return False
-    # A zombie passes the kill(0) check but the process has actually finished.
-    # Read /proc/<pid>/status to detect this case.
-    try:
-        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
-            if line.startswith("State:"):
-                if "Z" in line:          # zombie — process done, not yet reaped
-                    clear_pid(sid)
-                    return False
-                break
-    except OSError:
-        # /proc entry vanished between the kill check and here — process is gone
-        clear_pid(sid)
-        return False
-    return True
 
 
 def kill_run(sid: str) -> None:
