@@ -1286,52 +1286,54 @@ with tab_run:
         # --- Core selection ---
         available_cores = discover_cores()
 
-        def _has_run(y, s, d):
-            return find_pro_file(site_id(y, s, d)) is not None
-
-        cores_prev  = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _has_run(y, s, d)]
-        cores_fresh = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if not _has_run(y, s, d)]
-
         def _label(y, s, d, d0, d1):
             return f"{y} · {s} · {d} m    {d0} → {d1}"
+
+        def _core_status(y, s, d):
+            """Return 'running', 'incomplete', or 'fresh'."""
+            sid_ = site_id(y, s, d)
+            if is_running(sid_):
+                return "running"
+            if find_pro_file(sid_) is not None:
+                t_cur = get_pro_current_time(sid_)
+                _, t_end_ = get_expected_date_range(sid_)
+                if t_cur is not None and t_end_ is not None and t_cur < t_end_:
+                    return "incomplete"
+            return "fresh"
+
+        cores_running    = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _core_status(y, s, d) == "running"]
+        cores_incomplete = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _core_status(y, s, d) == "incomplete"]
+        cores_all        = available_cores  # all cores for a fresh / re-run
 
         use_custom = st.checkbox("Enter site manually", value=not bool(available_cores))
 
         if not use_custom and available_cores:
-            year, site, depth = None, None, None
+            # Build group radio options based on what exists
+            _group_options = ["All cores"]
+            if cores_incomplete:
+                _group_options.insert(0, "Incomplete / crashed")
+            if cores_running:
+                _group_options.insert(0, "In progress")
 
-            if cores_prev:
-                st.caption("Continue previous run")
-                prev_labels = [_label(*c) for c in cores_prev]
-                chosen_prev = st.selectbox("", prev_labels, key="sel_prev",
-                                           label_visibility="collapsed")
-                if chosen_prev:
-                    idx = prev_labels.index(chosen_prev)
-                    year, site, depth = cores_prev[idx][:3]
+            if len(_group_options) > 1:
+                _group = st.radio("", _group_options, horizontal=True,
+                                  index=_group_options.index("All cores"),
+                                  key="core_group_radio", label_visibility="collapsed")
+            else:
+                _group = "All cores"
 
-            if cores_fresh:
-                st.caption("Start fresh run")
-                fresh_labels = [_label(*c) for c in cores_fresh]
-                chosen_fresh = st.selectbox("", fresh_labels, key="sel_fresh",
-                                            label_visibility="collapsed")
+            if _group == "In progress":
+                _pool = cores_running
+            elif _group == "Incomplete / crashed":
+                _pool = cores_incomplete
+            else:
+                _pool = cores_all
 
-            # Determine active selection: whichever group the user last touched.
-            # Default to prev if available, otherwise fresh.
-            _group = st.radio("Use selection from", ["Previous run", "Fresh run"],
-                              horizontal=True,
-                              index=0 if cores_prev else 1,
-                              key="core_group_radio",
-                              label_visibility="collapsed" if (not cores_prev or not cores_fresh) else "visible")
-
-            if _group == "Fresh run" and cores_fresh:
-                idx = fresh_labels.index(chosen_fresh)
-                year, site, depth = cores_fresh[idx][:3]
-            elif cores_prev:
-                idx = prev_labels.index(chosen_prev)
-                year, site, depth = cores_prev[idx][:3]
-            elif cores_fresh:
-                idx = fresh_labels.index(chosen_fresh)
-                year, site, depth = cores_fresh[idx][:3]
+            _pool_labels = [_label(*c) for c in _pool]
+            chosen_label = st.selectbox("Core", _pool_labels,
+                                        label_visibility="collapsed")
+            idx = _pool_labels.index(chosen_label)
+            year, site, depth = _pool[idx][:3]
 
         else:
             if not available_cores:
