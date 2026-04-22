@@ -1285,20 +1285,54 @@ with tab_run:
 
         # --- Core selection ---
         available_cores = discover_cores()
-        core_labels = [
-            f"{y} · {s} · {d} m    {d0} → {d1}"
-            for y, s, d, d0, d1 in available_cores
-        ]
+
+        def _has_run(y, s, d):
+            return find_pro_file(site_id(y, s, d)) is not None
+
+        cores_prev  = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _has_run(y, s, d)]
+        cores_fresh = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if not _has_run(y, s, d)]
+
+        def _label(y, s, d, d0, d1):
+            return f"{y} · {s} · {d} m    {d0} → {d1}"
 
         use_custom = st.checkbox("Enter site manually", value=not bool(available_cores))
 
         if not use_custom and available_cores:
-            chosen_label = st.selectbox(
-                "Available cores (all required data files present)",
-                options=core_labels,
-            )
-            idx   = core_labels.index(chosen_label)
-            year, site, depth, _, _ = available_cores[idx]
+            year, site, depth = None, None, None
+
+            if cores_prev:
+                st.caption("Continue previous run")
+                prev_labels = [_label(*c) for c in cores_prev]
+                chosen_prev = st.selectbox("", prev_labels, key="sel_prev",
+                                           label_visibility="collapsed")
+                if chosen_prev:
+                    idx = prev_labels.index(chosen_prev)
+                    year, site, depth = cores_prev[idx][:3]
+
+            if cores_fresh:
+                st.caption("Start fresh run")
+                fresh_labels = [_label(*c) for c in cores_fresh]
+                chosen_fresh = st.selectbox("", fresh_labels, key="sel_fresh",
+                                            label_visibility="collapsed")
+
+            # Determine active selection: whichever group the user last touched.
+            # Default to prev if available, otherwise fresh.
+            _group = st.radio("Use selection from", ["Previous run", "Fresh run"],
+                              horizontal=True,
+                              index=0 if cores_prev else 1,
+                              key="core_group_radio",
+                              label_visibility="collapsed" if (not cores_prev or not cores_fresh) else "visible")
+
+            if _group == "Fresh run" and cores_fresh:
+                idx = fresh_labels.index(chosen_fresh)
+                year, site, depth = cores_fresh[idx][:3]
+            elif cores_prev:
+                idx = prev_labels.index(chosen_prev)
+                year, site, depth = cores_prev[idx][:3]
+            elif cores_fresh:
+                idx = fresh_labels.index(chosen_fresh)
+                year, site, depth = cores_fresh[idx][:3]
+
         else:
             if not available_cores:
                 st.info("No cores found in AllCoreDataCommonFormat/ — enter manually.")
