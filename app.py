@@ -234,7 +234,12 @@ def read_log_tail(sid: str, n_lines: int = 60) -> str:
 
 
 def get_pro_current_time(sid: str) -> "pd.Timestamp | None":
-    """Read the most recent timestep from the tail of the PRO file."""
+    """Read the most recent timestep from the tail of the PRO file.
+
+    Each SNOWPACK timestep block can be hundreds of KB (many layers × many
+    output codes), so we read the last 2 MB to ensure we capture at least
+    one '0500,' date line.
+    """
     pro = find_pro_file(sid)
     if pro is None or not pro.exists():
         return None
@@ -242,7 +247,7 @@ def get_pro_current_time(sid: str) -> "pd.Timestamp | None":
         with open(pro, "rb") as fh:
             fh.seek(0, 2)
             size = fh.tell()
-            fh.seek(max(0, size - 3000))
+            fh.seek(max(0, size - 2_000_000))
             tail = fh.read().decode("utf-8", errors="replace")
         for line in reversed(tail.splitlines()):
             if line.startswith("0500,"):
@@ -1301,16 +1306,17 @@ with tab_run:
                     return "incomplete" if t_cur < t_end_ else "complete"
             return "fresh"
 
-        cores_running    = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _core_status(y, s, d) == "running"]
-        cores_incomplete = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _core_status(y, s, d) == "incomplete"]
-        cores_complete   = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _core_status(y, s, d) == "complete"]
-        cores_all        = available_cores  # all cores for a fresh / re-run
+        _statuses        = {(y, s, d): _core_status(y, s, d) for y, s, d, _, _ in available_cores}
+        cores_running    = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _statuses[(y, s, d)] == "running"]
+        cores_incomplete = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _statuses[(y, s, d)] == "incomplete"]
+        cores_complete   = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _statuses[(y, s, d)] == "complete"]
+        cores_fresh      = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _statuses[(y, s, d)] == "fresh"]
 
         use_custom = st.checkbox("Enter site manually", value=not bool(available_cores))
 
         if not use_custom and available_cores:
             _group_options = [
-                f"All cores ({len(cores_all)})",
+                f"Not yet run ({len(cores_fresh)})",
                 f"Completed ({len(cores_complete)})",
                 f"Incomplete / crashed ({len(cores_incomplete)})",
                 f"In progress ({len(cores_running)})",
@@ -1326,11 +1332,12 @@ with tab_run:
             elif "Completed" in _group:
                 _pool = cores_complete
             else:
-                _pool = cores_all
+                _pool = cores_fresh
 
             if not _pool:
                 st.info("No cores in this category.")
-                year, site, depth = cores_all[0][:3] if cores_all else (2022, "T3", 25)
+                _fallback = cores_fresh or cores_complete or available_cores
+                year, site, depth = _fallback[0][:3] if _fallback else (2022, "T3", 25)
             else:
                 _pool_labels = [_label(*c) for c in _pool]
                 chosen_label = st.selectbox("Core", _pool_labels,
