@@ -2932,81 +2932,89 @@ def main() -> None:
     print("TEMP_FILE   :", TEMP_FILE, TEMP_FILE.exists())
     print("PROMICE_FILE:", PROMICE_FILE, PROMICE_FILE.exists())
     print("DENSITY_FILE:", DENSITY_FILE, DENSITY_FILE.exists())
+    print("SNO_FILE    :", INITIAL_SNO_FILE, INITIAL_SNO_FILE.exists())
+    print("SMET_FILE   :", FORCING_SMET_FILE, FORCING_SMET_FILE.exists())
 
-    for p in [TEMP_FILE, PROMICE_FILE, DENSITY_FILE]:
+    for p in [TEMP_FILE, PROMICE_FILE]:
         if not p.exists():
             raise FileNotFoundError(f"Required file not found: {p}")
 
     temp_df, meta = read_tempconcatenated(TEMP_FILE, default_elevation_m=DEFAULT_ELEVATION_M)
     promice_df = read_promice(PROMICE_FILE)
-    density_df = read_density_profile(DENSITY_FILE)
 
-    first_ts, first_row = first_valid_temp_profile(temp_df)
-    surface_change_m = promice_surface_change_at(promice_df, first_ts)
-
-    corrected_temp_profile = build_corrected_temp_profile(first_row, surface_change_m)
-    layer_df = interpolate_temperature_to_density_layers(corrected_temp_profile, density_df)
-    validate_layer_df_for_sno(layer_df)
-    sno_df = build_sno_dataframe(layer_df, first_ts)
-
-    hs_last = float(layer_df["bottom_m"].max())
-    erosion_level = len(sno_df) + 6
-    profile_date = first_ts.floor("min")
-
-    totals = sno_df["Vol_Frac_I"] + sno_df["Vol_Frac_W"] + sno_df["Vol_Frac_V"]
-    if not np.allclose(totals.to_numpy(), 1.0, atol=1e-8):
-        raise RuntimeError("Volume fractions do not sum to 1.")
-
-    parsed_ts = pd.to_datetime(sno_df["timestamp"])
-    if not parsed_ts.is_monotonic_increasing:
-        raise RuntimeError("Layer timestamps are not strictly increasing.")
-    if (parsed_ts >= first_ts).any():
-        raise RuntimeError("At least one layer timestamp is not before the first temperature timestamp.")
-
-    # ── Resume checkpoint: snapshot existing SNO before overwriting ─── #
-    _checkpoint_bytes = None
-    _checkpoint_date  = None
-    if INITIAL_SNO_FILE.exists():
+    # ── Detect resume checkpoint before doing any expensive setup ──────── #
+    _resuming = False
+    if INITIAL_SNO_FILE.exists() and FORCING_SMET_FILE.exists():
         try:
+            _first_ts, _ = first_valid_temp_profile(temp_df)
+            _profile_date = _first_ts.floor("min")
             for _line in INITIAL_SNO_FILE.read_text(errors="replace").splitlines():
                 if _line.strip().startswith("ProfileDate"):
                     _checkpoint_date = pd.Timestamp(_line.split("=", 1)[1].strip())
+                    if _checkpoint_date > _profile_date:
+                        _resuming = True
+                        print(f"Resuming from checkpoint at {_checkpoint_date} — "
+                              f"skipping SNO/SMET rebuild")
                     break
-            if _checkpoint_date is not None and _checkpoint_date > profile_date:
-                _checkpoint_bytes = INITIAL_SNO_FILE.read_bytes()
-                print(f"Resume checkpoint found at {_checkpoint_date}; "
-                      f"will restore after setup")
         except Exception:
             pass
 
-    write_sno_file(
-        out_path=INITIAL_SNO_FILE,
-        meta=meta,
-        sno_df=sno_df,
-        hs_last=hs_last,
-        erosion_level=erosion_level,
-        profile_date=profile_date,
-    )
-    print(f"Wrote initial SNO: {INITIAL_SNO_FILE}")
+    if _resuming:
+        # INI must always be (re)written so water_transport and paths are current
+        write_ini_file(
+            out_path=CFG_INI_FILE,
+            smet_name=FORCING_SMET_FILE.name,
+            sno_name=INITIAL_SNO_FILE.name,
+        )
+        print(f"Wrote INI: {CFG_INI_FILE}")
+    else:
+        density_df = read_density_profile(DENSITY_FILE)
 
-    _forcing_df = build_smet_from_downloaded_era(
-        temp_df=temp_df,
-        promice_df=promice_df,
-        density_df=density_df,
-        meta=meta,
-    )
+        first_ts, first_row = first_valid_temp_profile(temp_df)
+        surface_change_m = promice_surface_change_at(promice_df, first_ts)
 
-    write_ini_file(
-        out_path=CFG_INI_FILE,
-        smet_name=FORCING_SMET_FILE.name,
-        sno_name=INITIAL_SNO_FILE.name,
-    )
-    print(f"Wrote INI: {CFG_INI_FILE}")
+        corrected_temp_profile = build_corrected_temp_profile(first_row, surface_change_m)
+        layer_df = interpolate_temperature_to_density_layers(corrected_temp_profile, density_df)
+        validate_layer_df_for_sno(layer_df)
+        sno_df = build_sno_dataframe(layer_df, first_ts)
 
-    # Restore checkpoint SNO so cycle_hourly... can detect and resume from it
-    if _checkpoint_bytes is not None:
-        INITIAL_SNO_FILE.write_bytes(_checkpoint_bytes)
-        print(f"Restored checkpoint SNO at {_checkpoint_date}")
+        hs_last = float(layer_df["bottom_m"].max())
+        erosion_level = len(sno_df) + 6
+        profile_date = first_ts.floor("min")
+
+        totals = sno_df["Vol_Frac_I"] + sno_df["Vol_Frac_W"] + sno_df["Vol_Frac_V"]
+        if not np.allclose(totals.to_numpy(), 1.0, atol=1e-8):
+            raise RuntimeError("Volume fractions do not sum to 1.")
+
+        parsed_ts = pd.to_datetime(sno_df["timestamp"])
+        if not parsed_ts.is_monotonic_increasing:
+            raise RuntimeError("Layer timestamps are not strictly increasing.")
+        if (parsed_ts >= first_ts).any():
+            raise RuntimeError("At least one layer timestamp is not before the first temperature timestamp.")
+
+        write_sno_file(
+            out_path=INITIAL_SNO_FILE,
+            meta=meta,
+            sno_df=sno_df,
+            hs_last=hs_last,
+            erosion_level=erosion_level,
+            profile_date=profile_date,
+        )
+        print(f"Wrote initial SNO: {INITIAL_SNO_FILE}")
+
+        build_smet_from_downloaded_era(
+            temp_df=temp_df,
+            promice_df=promice_df,
+            density_df=density_df,
+            meta=meta,
+        )
+
+        write_ini_file(
+            out_path=CFG_INI_FILE,
+            smet_name=FORCING_SMET_FILE.name,
+            sno_name=INITIAL_SNO_FILE.name,
+        )
+        print(f"Wrote INI: {CFG_INI_FILE}")
 
     temp_df_hourly = keep_hourly(temp_df)
     hourly_index = make_hourly_index(temp_df_hourly.index.min(), temp_df_hourly.index.max())
