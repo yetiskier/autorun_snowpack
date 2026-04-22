@@ -128,6 +128,22 @@ MAX_ADJUST_PER_HOUR_C   : float
 MIN_OBS_FOR_ADJUST      : int
 WET_LAYER_DRAIN_THRESHOLD_C : float
 
+WATER_TRANSPORT          : str
+ASSIMILATION_INTERVAL_H  : int
+
+FORCING_TA_MULT   : float
+FORCING_TA_ADD    : float
+FORCING_RH_MULT   : float
+FORCING_RH_ADD    : float
+FORCING_VW_MULT   : float
+FORCING_VW_ADD    : float
+FORCING_ISWR_MULT : float
+FORCING_ISWR_ADD  : float
+FORCING_ILWR_MULT : float
+FORCING_ILWR_ADD  : float
+FORCING_PSUM_MULT : float
+FORCING_PSUM_ADD  : float
+
 
 # =============================================================================
 # CLI + SETTINGS LOADER
@@ -149,6 +165,15 @@ def parse_args() -> argparse.Namespace:
                         " Omit for full record.")
     p.add_argument("--settings", type=Path, default=None, metavar="PATH",
                    help="Path to settings.toml (default: autorun_snowpack/settings.toml)")
+    p.add_argument("--run-tag", default=None, metavar="TAG",
+                   help="Suffix appended to the project directory (e.g. 'bucket') so the "
+                        "run writes to <site_id>_<tag>/ without touching the original output. "
+                        "Data input files are still read from the untagged site directory.")
+    p.add_argument("--water-transport", default=None,
+                   choices=["adaptive", "BUCKET", "RICHARDSEQUATION"],
+                   help="Water transport scheme: 'adaptive' = BUCKET stabilisation then RE "
+                        "(default); 'BUCKET' = BUCKET throughout; 'RICHARDSEQUATION' = RE "
+                        "throughout (no stabilisation phase).")
     return p.parse_args()
 
 
@@ -185,15 +210,23 @@ def configure(args: argparse.Namespace, cfg: dict) -> None:
     global DEFAULT_NE, DEFAULT_CDOT, DEFAULT_METAMO
     global TSG_MODE, TSG_LOOKBACK_M, TSG_TARGET_OFFSET_M
     global ADD_BASAL_LAYERS, BASAL_LAYER_THICKNESSES_M, BASAL_TREND_LOOKBACK_M, BASAL_TEMP_MIN_C
-    global TEMP_MIN_C, TEMP_MAX_C, MAX_ADJUST_PER_HOUR_C, MIN_OBS_FOR_ADJUST
+    global TEMP_MIN_C, TEMP_MAX_C, MAX_ADJUST_PER_HOUR_C, MIN_OBS_FOR_ADJUST, ASSIMILATION_INTERVAL_H
     global WET_LAYER_DRAIN_THRESHOLD_C
+    global WATER_TRANSPORT
+    global FORCING_TA_MULT, FORCING_TA_ADD, FORCING_RH_MULT, FORCING_RH_ADD
+    global FORCING_VW_MULT, FORCING_VW_ADD, FORCING_ISWR_MULT, FORCING_ISWR_ADD
+    global FORCING_ILWR_MULT, FORCING_ILWR_ADD, FORCING_PSUM_MULT, FORCING_PSUM_ADD
 
     site_id  = f"{args.year}_{args.site}_{args.depth}m"
     base_dir = SCRIPT_DIR                  # autorun_snowpack/
 
     data_root_str = cfg["paths"].get("data_root", "").strip()
     DATA_DIR    = Path(data_root_str) if data_root_str else base_dir
-    PROJECT_DIR = base_dir / site_id
+
+    # --run-tag lets a comparison run write to a separate directory while
+    # still reading data from the canonical (untagged) site files.
+    project_id  = f"{site_id}_{args.run_tag}" if args.run_tag else site_id
+    PROJECT_DIR = base_dir / project_id
 
     TEMP_FILE    = DATA_DIR / f"AllCoreDataCommonFormat/Concatenated_Temperature_files/{site_id}_Tempconcatenated.csv"
     PROMICE_FILE = DATA_DIR / f"AllCoreDataCommonFormat/Depth_change_estimate/PROMICE/{site_id}_daily_PROMICE_snowfall.csv"
@@ -272,8 +305,24 @@ def configure(args: argparse.Namespace, cfg: dict) -> None:
     ERA5_DATASET    = str(e["dataset"])
     ERA5LAND_DATASET = str(e["land_dataset"])
 
-    KEEP_HOURLY_ARCHIVES = bool(cfg["run"]["keep_hourly_archives"])
-    KEEP_LAST_N_SNO      = int(cfg["run"]["keep_last_n_sno"])
+    fa = cfg.get("forcing_adjustments", {})
+    FORCING_TA_MULT   = float(fa.get("ta_multiplier",   1.0))
+    FORCING_TA_ADD    = float(fa.get("ta_offset",        0.0))
+    FORCING_RH_MULT   = float(fa.get("rh_multiplier",   1.0))
+    FORCING_RH_ADD    = float(fa.get("rh_offset",        0.0))
+    FORCING_VW_MULT   = float(fa.get("vw_multiplier",   1.0))
+    FORCING_VW_ADD    = float(fa.get("vw_offset",        0.0))
+    FORCING_ISWR_MULT = float(fa.get("iswr_multiplier", 1.0))
+    FORCING_ISWR_ADD  = float(fa.get("iswr_offset",      0.0))
+    FORCING_ILWR_MULT = float(fa.get("ilwr_multiplier", 1.0))
+    FORCING_ILWR_ADD  = float(fa.get("ilwr_offset",      0.0))
+    FORCING_PSUM_MULT = float(fa.get("psum_multiplier", 1.0))
+    FORCING_PSUM_ADD  = float(fa.get("psum_offset",      0.0))
+
+    KEEP_HOURLY_ARCHIVES    = bool(cfg["run"]["keep_hourly_archives"])
+    KEEP_LAST_N_SNO         = int(cfg["run"]["keep_last_n_sno"])
+    WATER_TRANSPORT         = str(cfg["run"].get("water_transport", "adaptive"))
+    ASSIMILATION_INTERVAL_H = int(cfg["run"].get("assimilation_interval_h", 1))
 
     print(f"Site:        {site_id}")
     print(f"Project dir: {PROJECT_DIR}")
@@ -1619,7 +1668,7 @@ def build_forcing_from_era5land(
     # Incremental precipitation. calc_incremental_precip_from_cumulative()
     # already returns mm from cumulative meters, so do not multiply again.
     psum = calc_incremental_precip_from_cumulative(
-        df["tp"].to_numpy(dtype=float)*1.5
+        df["tp"].to_numpy(dtype=float)
     )
 
 
@@ -1674,7 +1723,36 @@ def build_forcing_from_era5land(
     return forcing_df, cleanup_paths
 
 
-def write_smet_file(out_path: Path, meta: SiteMetadata, forcing_df: pd.DataFrame) -> None:
+def read_era5_geopotential_altitude(static_file: Path, lat: float, lon: float) -> Optional[float]:
+    """Return ERA5 surface geopotential height (m) at the nearest grid point."""
+    try:
+        ds = xr.open_dataset(static_file)
+        if "z" not in ds:
+            print(f"Warning: 'z' not found in {static_file}; using site elevation instead.")
+            ds.close()
+            return None
+        z_val = float(np.asarray(nearest_point_da(ds["z"], lat, lon).values).ravel()[0])
+        ds.close()
+        return z_val / 9.80665   # m²/s² → geopotential height in m
+    except Exception as exc:
+        print(f"Warning: could not read ERA5 geopotential altitude: {exc}")
+        return None
+
+
+def write_smet_file(out_path: Path, meta: SiteMetadata, forcing_df: pd.DataFrame,
+                    era5_altitude_m: Optional[float] = None) -> None:
+    altitude = era5_altitude_m if era5_altitude_m is not None else meta.elevation
+
+    # SMET: physical = stored * multiplier + offset
+    # Base offsets convert stored °C → K for TA and TSG; user adjustments are additive in °C.
+    # fields: timestamp TA   RH   TSG    VW   DW  ISWR  ILWR  PSUM
+    offsets     = [0, 273.15 + FORCING_TA_ADD,   FORCING_RH_ADD,   273.15,
+                      FORCING_VW_ADD,   0, FORCING_ISWR_ADD, FORCING_ILWR_ADD, FORCING_PSUM_ADD]
+    multipliers = [1, FORCING_TA_MULT,  FORCING_RH_MULT,  1,
+                      FORCING_VW_MULT,  1, FORCING_ISWR_MULT, FORCING_ILWR_MULT, FORCING_PSUM_MULT]
+    off_str  = " ".join(f"{v:g}" for v in offsets)
+    mult_str = " ".join(f"{v:g}" for v in multipliers)
+
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("SMET 1.1 ASCII\n")
         f.write("[HEADER]\n")
@@ -1682,12 +1760,12 @@ def write_smet_file(out_path: Path, meta: SiteMetadata, forcing_df: pd.DataFrame
         f.write(f"station_name     = {meta.station_name}\n")
         f.write(f"latitude         = {meta.latitude:.6f}\n")
         f.write(f"longitude        = {meta.longitude:.6f}\n")
-        f.write(f"altitude         = {meta.elevation:.3f}\n")
+        f.write(f"altitude         = {altitude:.3f}\n")
         f.write("nodata           = -999\n")
         f.write(f"tz               = {SMET_TZ}\n")
         f.write("fields           = timestamp TA RH TSG VW DW ISWR ILWR PSUM\n")
-        f.write("units_offset     = 0 273.15 0 273.15 0 0 0 0 0\n")
-        f.write("units_multiplier = 1 1 1 1 1 1 1 1 1\n")
+        f.write(f"units_offset     = {off_str}\n")
+        f.write(f"units_multiplier = {mult_str}\n")
         f.write("[DATA]\n")
 
         for _, r in forcing_df.iterrows():
@@ -1751,7 +1829,10 @@ def build_smet_from_downloaded_era(
         )
         temp_paths_to_delete.extend(extracted_temp_paths)
 
-        write_smet_file(FORCING_SMET_FILE, meta, forcing_df)
+        era5_alt = read_era5_geopotential_altitude(static_file, meta.latitude, meta.longitude)
+        if era5_alt is not None:
+            print(f"ERA5 geopotential altitude: {era5_alt:.1f} m (site elevation: {meta.elevation:.1f} m)")
+        write_smet_file(FORCING_SMET_FILE, meta, forcing_df, era5_altitude_m=era5_alt)
         print(f"Wrote forcing SMET: {FORCING_SMET_FILE}")
 
     except Exception:
@@ -2335,12 +2416,12 @@ def update_sno_temperatures_from_moving_profile(
     obs_profile: pd.DataFrame,
     alpha: float,
     new_profile_date: pd.Timestamp,
+    n_hours: int = 1,
 ) -> None:
     profile = obs_profile.copy()
     profile = profile[
         np.isfinite(profile["actual_depth_m"]) &
-        np.isfinite(profile["temperature_C"]) &
-        (profile["actual_depth_m"] >= 0.0)
+        np.isfinite(profile["temperature_C"])
     ].sort_values("actual_depth_m")
 
     lines = sno_in.read_text(encoding="utf-8").splitlines(keepends=True)
@@ -2432,7 +2513,8 @@ def update_sno_temperatures_from_moving_profile(
 
     proposed_C = model_temps_C + alpha * (obs_interp_C - model_temps_C)
     delta_C = proposed_C - model_temps_C
-    delta_C = np.clip(delta_C, -MAX_ADJUST_PER_HOUR_C, MAX_ADJUST_PER_HOUR_C)
+    max_delta = MAX_ADJUST_PER_HOUR_C * n_hours
+    delta_C = np.clip(delta_C, -max_delta, max_delta)
 
     # Dry layers: assimilate normally when within observed range and safely frozen.
     safe_for_assim = (
@@ -2560,7 +2642,7 @@ def run_snowpack_one_step(
     start_time: pd.Timestamp,
     end_time: pd.Timestamp,
     work_dir: Path,
-    timeout_s: int = 300,
+    timeout_s: int = 900,
 ) -> tuple[bool, str]:
     import time
 
@@ -2621,8 +2703,16 @@ def cycle_hourly_snowpack_with_moving_profile(
     input_sno_file: Path,
     alpha: float,
     stabilization_days: int = 15,
+    water_transport: str = "adaptive",
+    assimilation_interval_h: int = 1,
 ) -> None:
     """Run SNOWPACK hour-by-hour with temperature assimilation.
+
+    water_transport:
+      'adaptive'        – BUCKET for stabilisation_days then RICHARDSEQUATION
+                          with automatic BUCKET fallback on convergence failure.
+      'BUCKET'          – BUCKET throughout; no RE switch, no fallback.
+      'RICHARDSEQUATION'– RE throughout from step 0; no stabilisation phase.
 
     Uses BUCKET water transport for the first ``stabilization_days`` days so
     the highly-icy initial profile can equilibrate, then rewrites the INI to
@@ -2633,21 +2723,73 @@ def cycle_hourly_snowpack_with_moving_profile(
         raise ValueError("Need at least two hourly timestamps.")
 
     stabilization_hours = stabilization_days * 24
-    switched = False   # have we already switched to RICHARDSEQUATION?
 
-    apply_initial_temperature_adjustment(
-        input_sno_file=input_sno_file,
-        long_df=long_df,
-        t0=times[0],
-        alpha=alpha,
-    )
+    # ── Resume detection ──────────────────────────────────────────────── #
+    # If the .sno file's ProfileDate is already ahead of times[0], we are
+    # resuming a previously interrupted run.  Skip the initial adjustment
+    # and start the loop from the matching index.
+    i_start = 0
+    try:
+        sno_text = input_sno_file.read_text(errors="replace")
+        for line in sno_text.splitlines():
+            if line.strip().startswith("ProfileDate"):
+                sno_date = pd.Timestamp(line.split("=", 1)[1].strip())
+                matches = np.where(times == sno_date)[0]
+                if len(matches) and matches[0] > 0:
+                    i_start = int(matches[0])
+                    print(f"Resuming from {sno_date} (step {i_start})")
+                break
+    except Exception:
+        pass
 
-    for i in range(len(times) - 1):
+    # Determine initial INI scheme based on water_transport mode
+    if water_transport == "BUCKET":
+        ini_scheme = "BUCKET"
+        switched = True     # never switch away from BUCKET
+        using_re = False
+    elif water_transport == "RICHARDSEQUATION":
+        ini_scheme = "RICHARDSEQUATION"
+        switched = True     # already in RE, no stabilisation phase
+        using_re = True
+    else:  # adaptive
+        ini_scheme = "BUCKET"
+        switched = i_start >= stabilization_hours
+        using_re = switched
+
+    bucket_fallback_remaining = 0
+
+    if i_start == 0:
+        apply_initial_temperature_adjustment(
+            input_sno_file=input_sno_file,
+            long_df=long_df,
+            t0=times[0],
+            alpha=alpha,
+        )
+        write_ini_file(
+            out_path=ini_file,
+            smet_name=FORCING_SMET_FILE.name,
+            sno_name=INITIAL_SNO_FILE.name,
+            water_transport=ini_scheme,
+        )
+    else:
+        # Resuming — set INI to match current expected scheme
+        resume_scheme = ("RICHARDSEQUATION" if using_re else "BUCKET")
+        write_ini_file(
+            out_path=ini_file,
+            smet_name=FORCING_SMET_FILE.name,
+            sno_name=INITIAL_SNO_FILE.name,
+            water_transport=resume_scheme,
+        )
+        print(f"Resume: INI set to {resume_scheme}")
+
+    for i in range(i_start, len(times) - 1, assimilation_interval_h):
         t0 = times[i]
-        t1 = times[i + 1]
+        i_end = min(i + assimilation_interval_h, len(times) - 1)
+        t1 = times[i_end]
+        n_hours = i_end - i
 
-        # Switch water transport scheme after stabilization period
-        if not switched and i >= stabilization_hours:
+        # ── Stabilization → RE switch (adaptive mode only) ────────────── #
+        if water_transport == "adaptive" and not switched and i >= stabilization_hours:
             print(f"Stabilization complete at {t0} — switching to RICHARDSEQUATION")
             write_ini_file(
                 out_path=ini_file,
@@ -2656,6 +2798,20 @@ def cycle_hourly_snowpack_with_moving_profile(
                 water_transport="RICHARDSEQUATION",
             )
             switched = True
+            using_re = True
+
+        # ── BUCKET fallback countdown → restore RE when done ──────────── #
+        if bucket_fallback_remaining > 0:
+            bucket_fallback_remaining = max(0, bucket_fallback_remaining - n_hours)
+            if bucket_fallback_remaining == 0:
+                print(f"{t0}: RE fallback period over — switching back to RICHARDSEQUATION")
+                write_ini_file(
+                    out_path=ini_file,
+                    smet_name=FORCING_SMET_FILE.name,
+                    sno_name=INITIAL_SNO_FILE.name,
+                    water_transport="RICHARDSEQUATION",
+                )
+                using_re = True
 
         ok, msg = run_snowpack_one_step(
             snowpack_exe=SNOWPACK_EXE,
@@ -2664,6 +2820,34 @@ def cycle_hourly_snowpack_with_moving_profile(
             end_time=t1,
             work_dir=PROJECT_DIR,
         )
+
+        # ── RE convergence failure → fall back to BUCKET (adaptive only) ─ #
+        # Must be checked BEFORE the ok-guard so a RE timeout triggers a
+        # BUCKET retry of the same step rather than an immediate crash.
+        if water_transport == "adaptive" and using_re and "Richards-Equation solver: no convergence" in msg:
+            write_ini_file(
+                out_path=ini_file,
+                smet_name=FORCING_SMET_FILE.name,
+                sno_name=INITIAL_SNO_FILE.name,
+                water_transport="BUCKET",
+            )
+            using_re = False
+            bucket_fallback_remaining = 24
+
+            if not ok:
+                # RE timed out — retry this step with BUCKET
+                print(f"{t0}→{t1}: RE timed out with convergence failures; "
+                      f"retrying with BUCKET (fallback for 24 h)")
+                ok, msg = run_snowpack_one_step(
+                    snowpack_exe=SNOWPACK_EXE,
+                    ini_file=ini_file,
+                    start_time=t0,
+                    end_time=t1,
+                    work_dir=PROJECT_DIR,
+                )
+            else:
+                print(f"{t1}: RE SafeMode convergence failure; "
+                      f"switching to BUCKET for next 24 model hours")
 
         if not ok:
             raise RuntimeError("SNOWPACK failed\n" + msg)
@@ -2695,6 +2879,7 @@ def cycle_hourly_snowpack_with_moving_profile(
                 obs_profile=obs_profile,
                 alpha=alpha,
                 new_profile_date=t1,
+                n_hours=n_hours,
             )
 
             shutil.copy2(adjusted_archive, input_sno_file)
@@ -2708,6 +2893,7 @@ def cycle_hourly_snowpack_with_moving_profile(
                 obs_profile=obs_profile,
                 alpha=alpha,
                 new_profile_date=t1,
+                n_hours=n_hours,
             )
 
             shutil.copy2(tmp_adjusted, input_sno_file)
@@ -2777,6 +2963,22 @@ def main() -> None:
     if (parsed_ts >= first_ts).any():
         raise RuntimeError("At least one layer timestamp is not before the first temperature timestamp.")
 
+    # ── Resume checkpoint: snapshot existing SNO before overwriting ─── #
+    _checkpoint_bytes = None
+    _checkpoint_date  = None
+    if INITIAL_SNO_FILE.exists():
+        try:
+            for _line in INITIAL_SNO_FILE.read_text(errors="replace").splitlines():
+                if _line.strip().startswith("ProfileDate"):
+                    _checkpoint_date = pd.Timestamp(_line.split("=", 1)[1].strip())
+                    break
+            if _checkpoint_date is not None and _checkpoint_date > profile_date:
+                _checkpoint_bytes = INITIAL_SNO_FILE.read_bytes()
+                print(f"Resume checkpoint found at {_checkpoint_date}; "
+                      f"will restore after setup")
+        except Exception:
+            pass
+
     write_sno_file(
         out_path=INITIAL_SNO_FILE,
         meta=meta,
@@ -2800,6 +3002,11 @@ def main() -> None:
         sno_name=INITIAL_SNO_FILE.name,
     )
     print(f"Wrote INI: {CFG_INI_FILE}")
+
+    # Restore checkpoint SNO so cycle_hourly... can detect and resume from it
+    if _checkpoint_bytes is not None:
+        INITIAL_SNO_FILE.write_bytes(_checkpoint_bytes)
+        print(f"Restored checkpoint SNO at {_checkpoint_date}")
 
     temp_df_hourly = keep_hourly(temp_df)
     hourly_index = make_hourly_index(temp_df_hourly.index.min(), temp_df_hourly.index.max())
@@ -2832,6 +3039,8 @@ def main() -> None:
         input_sno_file=INITIAL_SNO_FILE,
         alpha=ALPHA,
         stabilization_days=15,
+        water_transport=args.water_transport if args.water_transport is not None else WATER_TRANSPORT,
+        assimilation_interval_h=ASSIMILATION_INTERVAL_H,
     )
 
     # Generate static PNG figures via visualize_pro.py

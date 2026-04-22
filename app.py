@@ -170,7 +170,16 @@ def kill_run(sid: str) -> None:
 
 
 # Lines from SNOWPACK's Richards-equation solver that clutter the log.
-_LOG_FILTER = r"^\s*(layer \[|upper boundary \[|SAFE MODE|Estimated mass balance|[-]{10})"
+_LOG_FILTER = (
+    # Richards-equation convergence warning blocks (header line has no leading whitespace)
+    r"Richards-Equation solver"
+    r"|SafeMode was used"
+    # Indented body lines of the warning block
+    r"|^\s*(layer \[|upper boundary \[|SAFE MODE|Estimated mass balance|[-]{10}"
+    r"|POSSIBLE SOLUTIONS|={5,}|LB_COND_WATERFLUX|WATERTRANSPORTMODEL"
+    r"|SOLVER DUMP|surfacefluxrate|wet state\.|of the ini-file\."
+    r"|Verify that the soil|If the snow|If the soil is|Try bucket scheme)"
+)
 
 def launch_run(year: int, site: str, depth: int, run_until: str) -> int:
     sid = site_id(year, site, depth)
@@ -338,7 +347,8 @@ for _i, _c in enumerate(_ALL_CODES):
 # ---------------------------------------------------------------------------
 # PRO parser (minimal, reused from visualize_pro.py)
 # ---------------------------------------------------------------------------
-_WANTED = {501, 502, 503, 506, 509, 510, 512, 513, 515}  # 502=density, 506=LWC, 515=ice vol frac
+_WANTED     = {501, 502, 503, 506, 509, 510, 512, 513, 515}     # main PRO codes
+_SAT_WANTED = {501, 502, 515}                                     # codes for residual saturation only
 
 def _parse_pro(path: Path) -> dict:
     data, current, times, in_data = {c: [] for c in _WANTED}, {}, [], False
@@ -413,7 +423,7 @@ def _to_grid_stepfn(times, heights_list, values_list, depth_grid):
 
 @st.cache_data(show_spinner="Parsing PRO file…")
 def load_pro(pro_path_str: str, _mtime: float = 0.0) -> dict:
-    """Parse PRO file and build gridded arrays. v2 (adds ice frac + refreezing)"""
+    """Parse PRO file and build gridded arrays. v4 (density-filtered refreezing)"""
     path = Path(pro_path_str)
     pro  = _parse_pro(path)
     times = pd.DatetimeIndex(pro["times"])
@@ -437,21 +447,52 @@ def load_pro(pro_path_str: str, _mtime: float = 0.0) -> dict:
     # Mask below soil
     for ti, sd in enumerate(soil_depth_m):
         below = depth_grid > sd
-        MK_idx[ti, below]   = np.nan
-        MK_raw[ti, below]   = np.nan
+        MK_idx[ti, below]    = np.nan
+        MK_raw[ti, below]    = np.nan
         Den_grid[ti, below]  = np.nan
         LWC_grid[ti, below]  = np.nan
         Ice_grid[ti, below]  = np.nan
 
     # Cumulative refreezing (mm w.e. = kg/m²)
-    # Positive step in ice fraction → water refroze in that cell.
-    # ice_vol_frac in %, depth_step in m, ice density 917 kg/m³.
-    depth_step = float(depth_grid[1] - depth_grid[0]) if len(depth_grid) > 1 else 0.05
-    dIce = np.diff(Ice_grid, axis=0)                       # (n_times-1, n_depth), % vol
-    refreezing_per_step = np.nansum(
-        np.where(dIce > 0, dIce, 0.0) / 100.0 * depth_step * 917.0,
-        axis=1,
-    )                                                       # kg/m² per timestep
+    # Use raw per-element data (not gridded) to avoid Lagrangian→Eulerian
+    # interpolation artifacts that create spurious ice-fraction jumps.
+    # Refreezing is the only process that simultaneously increases ice mass
+    # AND decreases LWC mass, so: refreezing = min(Δice+, ΔLWC-) per step.
+    n_times = len(times)
+    ice_col = np.zeros(n_times)   # firn-only column ice  mass (kg/m²)
+    lwc_col = np.zeros(n_times)   # firn-only column LWC  mass (kg/m²)
+    for ti in range(n_times):
+        h   = np.asarray(pro[501][ti], dtype=float)
+        ice = np.asarray(pro[515][ti], dtype=float)
+        lwc = np.asarray(pro[506][ti], dtype=float)
+        den = np.asarray(pro[502][ti], dtype=float)
+        n = min(len(h), len(ice), len(lwc), len(den))
+        if n < 2:
+            continue
+        h = h[:n]; ice = ice[:n]; lwc = lwc[:n]; den = den[:n]
+        order = np.argsort(h)
+        h = h[order]; ice = ice[order]; lwc = lwc[order]; den = den[order]
+        # Exclude soil and glacial-ice elements:
+        #   h > 0  → above the soil/ice interface (reference level)
+        #   den < 900  → not pure glacial ice (firn ≤ ~880, ice ≈ 917 kg/m³)
+        mask = (h > 0) & (den < 900.0)
+        if mask.sum() < 2:
+            continue
+        h = h[mask]; ice = ice[mask]; lwc = lwc[mask]
+        nf = len(h)
+        thick = np.empty(nf)
+        thick[1:] = (h[1:] - h[:-1]) / 100.0   # m
+        thick[0]  = h[0] / 100.0                 # bottom firn element → soil at h=0
+        ice_col[ti] = np.nansum(ice / 100.0 * thick * 917.0)
+        lwc_col[ti] = np.nansum(lwc / 100.0 * thick * 1000.0)
+    d_ice = np.diff(ice_col)
+    d_lwc = np.diff(lwc_col)
+    # Count all refreezing as permanent: once ice refreezes below ~4 cm depth
+    # it does not melt again, so no credit/debit system is needed.
+    refreezing_per_step = np.minimum(
+        np.where(d_ice > 0, d_ice, 0.0),
+        np.where(d_lwc < 0, -d_lwc, 0.0),
+    )
     cumul_refreezing = np.concatenate([[0.0], np.cumsum(refreezing_per_step)])
 
     return {
@@ -466,6 +507,71 @@ def load_pro(pro_path_str: str, _mtime: float = 0.0) -> dict:
         "cumul_refreezing":  cumul_refreezing,   # kg/m² = mm w.e., len = n_times
         "raw":               pro,
     }
+
+
+@st.cache_data(show_spinner="Computing residual saturation…")
+def load_sat_grid(pro_path_str: str, _mtime: float = 0.0) -> dict:
+    """Coléou & Lesaffre (1998) residual saturation for the top 5 m only.
+
+    Parses only codes 501 (heights), 502 (density), 516 (air vol %) and grids
+    to a 5 m depth axis so this stays fast even for multi-year PRO files.
+    """
+    path = Path(pro_path_str)
+    data: dict = {c: [] for c in _SAT_WANTED}
+    current: dict = {}
+    times: list = []
+    in_data = False
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if line.startswith("[DATA]"):
+                in_data = True; continue
+            if not in_data:
+                continue
+            code_str, _, rest = line.partition(",")
+            try:
+                code = int(code_str)
+            except ValueError:
+                continue
+            if code == 500:
+                if current:
+                    for c in _SAT_WANTED:
+                        data[c].append(current.get(c, np.array([])))
+                current = {}
+                times.append(pd.to_datetime(rest.strip(), dayfirst=True))
+            elif code in _SAT_WANTED:
+                vals = rest.split(",")
+                current[code] = np.array([float(v) for v in vals[1:]])
+    if current:
+        for c in _SAT_WANTED:
+            data[c].append(current.get(c, np.array([])))
+
+    times_idx = pd.DatetimeIndex(times)
+    depth_5m  = np.arange(0.0, 5.05, 0.05)   # 101 depth points, much less than full grid
+
+    Den5 = _to_grid_stepfn(times_idx, data[501], data[502], depth_5m)
+    Ice5 = _to_grid_stepfn(times_idx, data[501], data[515], depth_5m)
+
+    # Mask below the firn/soil surface
+    for ti, h_arr in enumerate(data[501]):
+        if len(h_arr):
+            sd = h_arr.max() / 100.0
+            below = depth_5m > sd
+            Den5[ti, below] = np.nan
+            Ice5[ti, below] = np.nan
+
+    # C&L (1998): θ_irr = 0.0264*φ + 0.0099  (vol fraction)
+    # φ = 1 - θ_ice: total pore space (water + air), i.e. everything that is not ice
+    with np.errstate(invalid="ignore", divide="ignore"):
+        phi       = np.where(np.isfinite(Ice5), np.clip(1.0 - Ice5 / 100.0, 0.0, 1.0), np.nan)
+        theta_irr = 0.0264 * phi + 0.0099
+        Sat5 = np.where(
+            np.isfinite(Den5) & (Den5 > 0),
+            np.clip(theta_irr * (1000.0 / Den5) * 100.0, 0.0, None),
+            np.nan,
+        )
+
+    return {"times": times_idx, "depth_5m": depth_5m, "Sat_grid": Sat5}
 
 
 # ---------------------------------------------------------------------------
@@ -690,237 +796,433 @@ def _build_hover_payload(pro_path_str: str, _mtime: float = 0.0) -> str:
     return json.dumps(payload, allow_nan=False)
 
 
+@st.cache_data(show_spinner="Preparing heatmap data…")
+def _build_timeseries_payload(pro_path_str: str, sid: str, _mtime: float = 0.0) -> str:
+    """Downsampled T, LWC, refreezing + optional observed-T payload for JS charts. v1"""
+    d          = load_pro(pro_path_str, _mtime=_mtime)
+    times      = d["times"]
+    depth_grid = d["depth_grid"]
+    T_grid     = d["T_grid"]
+    LWC_grid   = d["LWC_grid"]
+    cumul_rf   = d["cumul_refreezing"]
+    soil_depth = d["soil_depth_m"]
+
+    n_times = len(times)
+    step    = max(1, n_times // 365)
+    idx     = list(range(0, n_times, step))
+
+    t_labels   = [str(times[i])[:16] for i in idx]
+    depth_list = [round(float(v), 4) for v in depth_grid]
+    soil_sub   = [round(float(v), 3) for v in soil_depth[idx]]
+
+    def _mat(arr_sub):
+        out = []
+        for di in range(arr_sub.shape[1]):
+            row = []
+            for ti in range(arr_sub.shape[0]):
+                v = arr_sub[ti, di]
+                row.append(None if math.isnan(v) else round(float(v), 3))
+            out.append(row)
+        return out
+
+    T_sub   = T_grid[idx]
+    LWC_sub = LWC_grid[idx]
+
+    obs = load_observed_temp(sid)
+    if obs is not None:
+        zmin_T = max(float(np.nanmin(obs[2])) - 1.0, -30.0)
+    else:
+        zmin_T = max(float(np.nanmin(T_grid)) - 1.0, -30.0)
+
+    # Refreezing at full resolution (1D — small enough)
+    rf_t = [str(times[i])[:16] for i in range(n_times)]
+    rf_y = [None if (v != v) else round(float(v), 3) for v in cumul_rf]
+
+    payload: dict = {
+        "T": {
+            "x": t_labels, "y": depth_list, "z": _mat(T_sub),
+            "soil": soil_sub, "maxDepth": float(depth_grid.max()),
+            "zmin": round(float(zmin_T), 2),
+        },
+        "LWC": {
+            "x": t_labels, "y": depth_list, "z": _mat(LWC_sub),
+            "soil": soil_sub, "maxDepth": float(depth_grid.max()),
+        },
+        "rf":     {"x": rf_t, "y": rf_y},
+        "hasObs": obs is not None,
+    }
+
+    if obs is not None:
+        obs_times, obs_depths, obs_T_data = obs
+        n_obs     = len(obs_times)
+        obs_step  = max(1, n_obs // 365)
+        obs_idx   = list(range(0, n_obs, obs_step))
+        obs_t     = [str(obs_times[i])[:16] for i in obs_idx]
+        obs_dep   = [round(float(v), 4) for v in obs_depths]
+        obs_T_sub = obs_T_data[obs_idx]
+        obs_z: list = []
+        for di in range(obs_T_sub.shape[1]):
+            row = []
+            for ti in range(obs_T_sub.shape[0]):
+                v = obs_T_sub[ti, di]
+                row.append(None if (v != v) else round(float(v), 3))
+            obs_z.append(row)
+        payload["obsT"] = {
+            "x": obs_t, "y": obs_dep, "z": obs_z,
+            "zmin": round(float(zmin_T), 2),
+        }
+
+    return json.dumps(payload, allow_nan=False)
+
+
 def show_interactive_charts(sid: str) -> None:
     pro_path = find_pro_file(sid)
     if pro_path is None:
         st.info("No .pro output file found — run the model first.")
         return
 
-    mtime   = pro_path.stat().st_mtime
-    payload = _build_hover_payload(str(pro_path), _mtime=mtime)
+    mtime = pro_path.stat().st_mtime
 
-    # ------------------------------------------------------------------ #
-    # Self-contained HTML component — grain-type heatmap + column profile
-    # Hover on heatmap → column updates entirely in the browser (no rerun)
-    # ------------------------------------------------------------------ #
+    # ── Plot selector ──────────────────────────────────────────────────── #
+    _CHECKBOXES = [
+        ("Grain type",          ["Grain type"]),
+        ("Temperature",         ["Modelled temperature", "Observed temperature"]),
+        ("LWC & Refreezing",    ["Liquid water content", "Cumulative refreezing"]),
+        ("Residual saturation", ["Residual saturation"]),
+        ("Density",             ["Density"]),
+    ]
+    show = set()
+    cols = st.columns(len(_CHECKBOXES))
+    for col, (label, members) in zip(cols, _CHECKBOXES):
+        if col.checkbox(label, value=False, key=f"plot_sel_{sid}_{label}"):
+            show.update(members)
+    if not show:
+        return
+
     title_safe = sid.replace("'", "\\'")
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
+
+    # ── Grain-type legend + HTML component ─────────────────────────────── #
+    if "Grain type" in show:
+        mk_payload = _build_hover_payload(str(pro_path), _mtime=mtime)
+        swatches = "".join(
+            f'<div style="display:flex;align-items:center;gap:4px;background:#f5f5f5;'
+            f'border-radius:4px;padding:3px 8px;white-space:nowrap">'
+            f'<div style="width:14px;height:14px;background:{color};border-radius:3px;'
+            f'flex-shrink:0;border:1px solid rgba(0,0,0,0.15)"></div>'
+            f'<span style="font-size:11px;color:#333">{name}</span></div>'
+            for code in sorted(MK_CATALOG.keys())
+            for color, name in [MK_CATALOG[code]]
+        )
+        st.markdown(
+            f'<div style="display:flex;flex-wrap:wrap;gap:6px;padding:6px 0">'
+            f'{swatches}</div>',
+            unsafe_allow_html=True,
+        )
+        mk_html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
-<style>
-*{{box-sizing:border-box;margin:0;padding:0}}
+<style>*{{box-sizing:border-box;margin:0;padding:0}}
 body{{background:transparent;font-family:sans-serif;overflow:hidden}}
-#wrap{{display:flex;width:100%;height:650px;gap:4px}}
-#mk-div{{flex:3;min-width:0}}
-#col-div{{flex:1;min-width:0}}
-</style>
-</head>
-<body>
+#wrap{{display:flex;width:100%;height:550px;gap:4px}}
+#mk-div{{flex:3;min-width:0}}#col-div{{flex:1;min-width:0}}</style>
+</head><body>
 <div id="wrap"><div id="mk-div"></div><div id="col-div"></div></div>
 <script>
-var PL = {payload};
-var hd = PL.heatmap;
-var profiles = PL.profiles;  // one entry per heatmap column
-
-/* ── Grain-type heatmap ── */
+var PL={mk_payload};
+var hd=PL.heatmap,profiles=PL.profiles;
 Plotly.newPlot('mk-div',[
-  {{type:'heatmap',x:hd.x,y:hd.y,z:hd.z,
-    customdata:hd.customdata,
-    colorscale:hd.colorscale,zmin:hd.zmin,zmax:hd.zmax,
-    showscale:false,
+  {{type:'heatmap',x:hd.x,y:hd.y,z:hd.z,customdata:hd.customdata,
+    colorscale:hd.colorscale,zmin:hd.zmin,zmax:hd.zmax,showscale:false,
     hovertemplate:'%{{x}}<br>%{{y:.2f}} m  code %{{customdata:.0f}}<extra></extra>'}},
   {{type:'scatter',x:hd.x,y:hd.soil,mode:'lines',
     line:{{color:'black',width:1.5}},hoverinfo:'skip',showlegend:false}},
   {{type:'scatter',x:[hd.x[0],hd.x[0]],y:[0,hd.maxDepth],mode:'lines',
     line:{{color:'white',width:2,dash:'dot'}},hoverinfo:'skip',showlegend:false}}
-],{{
-  title:{{text:'{title_safe} — Swiss grain type (hover for profile)',font:{{size:13}}}},
-  yaxis:{{title:'Depth (m)',autorange:'reversed'}},
-  xaxis:{{title:'Date'}},
-  height:650,margin:{{l:60,r:10,t:40,b:55}},
-  plot_bgcolor:'white'
+],{{title:{{text:'{title_safe} — Swiss grain type (hover for profile)',font:{{size:13}}}},
+  yaxis:{{title:'Depth (m)',autorange:'reversed'}},xaxis:{{title:'Date'}},
+  height:550,margin:{{l:60,r:10,t:40,b:55}},plot_bgcolor:'white'
 }},{{responsive:true,displayModeBar:false}});
-
-/* ── Column profile helpers ── */
 function colTraces(p){{
-  var cd=p.names.map(function(n,i){{
-    return [n,p.depth_top[i],p.depth_bot[i],p.temp[i],p.hard[i]];
-  }});
+  var cd=p.names.map(function(n,i){{return [n,p.depth_top[i],p.depth_bot[i],p.temp[i],p.hard[i]];}});
   return [
-    {{type:'bar',orientation:'h',
-      x:p.hard,y:p.depth_mid,width:p.thickness,
-      marker:{{color:p.colors,line:{{color:'rgba(0,0,0,0.2)',width:0.5}}}},
-      customdata:cd,
+    {{type:'bar',orientation:'h',x:p.hard,y:p.depth_mid,width:p.thickness,
+      marker:{{color:p.colors,line:{{color:'rgba(0,0,0,0.2)',width:0.5}}}},customdata:cd,
       hovertemplate:'<b>%{{customdata[0]}}</b><br>%{{customdata[1]:.2f}}–%{{customdata[2]:.2f}} m<br>T: %{{customdata[3]:.2f}}°C  Hard: %{{customdata[4]:.1f}}<extra></extra>',
       showlegend:false,xaxis:'x'}},
     {{type:'scatter',x:p.temp,y:p.depth_mid,mode:'lines',
-      line:{{color:'crimson',width:2}},xaxis:'x2',yaxis:'y',
-      name:'Temp',
+      line:{{color:'crimson',width:2}},xaxis:'x2',yaxis:'y',name:'Temp',
       hovertemplate:'T: %{{x:.2f}}°C @ %{{y:.2f}} m<extra></extra>'}}
   ];
 }}
-function colLayout(p,label){{
-  return {{
-    title:{{text:label||'',font:{{size:11}}}},
-    xaxis:{{title:'Hardness',range:[0,6.5],side:'bottom',
-            tickvals:[1,2,3,4,5,6],
-            ticktext:['fist','4f','1f','pen','knife','ice']}},
-    xaxis2:{{title:'T (°C)',side:'top',overlaying:'x',
-             range:[p.t_min,0],showgrid:false,tickformat:'.0f'}},
-    yaxis:{{title:'Depth (m)',autorange:'reversed'}},
-    legend:{{x:0,y:-0.09,orientation:'h',font:{{size:10}}}},
-    height:650,margin:{{l:55,r:10,t:50,b:65}},
-    bargap:0,plot_bgcolor:'white'
-  }};
-}}
-
-/* Initial render — first non-null profile */
+function colLayout(p,label){{return {{
+  title:{{text:label||'',font:{{size:11}}}},
+  xaxis:{{title:'Hardness',range:[0,6.5],side:'bottom',tickvals:[1,2,3,4,5,6],
+          ticktext:['fist','4f','1f','pen','knife','ice']}},
+  xaxis2:{{title:'T (°C)',side:'top',overlaying:'x',range:[p.t_min,0],showgrid:false,tickformat:'.0f'}},
+  yaxis:{{title:'Depth (m)',autorange:'reversed'}},
+  legend:{{x:0,y:-0.09,orientation:'h',font:{{size:10}}}},
+  height:550,margin:{{l:55,r:10,t:50,b:65}},bargap:0,plot_bgcolor:'white'
+}};}}
 var p0=null,i0=0;
 for(var i=0;i<profiles.length;i++){{if(profiles[i]){{p0=profiles[i];i0=i;break;}}}}
-if(p0) Plotly.newPlot('col-div',colTraces(p0),colLayout(p0,hd.x[i0]),
-                      {{responsive:true,displayModeBar:false}});
-
-/* ── Hover handler ── */
+if(p0) Plotly.newPlot('col-div',colTraces(p0),colLayout(p0,hd.x[i0]),{{responsive:true,displayModeBar:false}});
 var curSub=-1;
 document.getElementById('mk-div').on('plotly_hover',function(data){{
   if(!data||!data.points||!data.points.length) return;
-  var pt=data.points[0];
-  // pointIndex for heatmap: [depth_idx, time_idx]
-  var subIdx=Array.isArray(pt.pointIndex)?pt.pointIndex[1]:0;
-  if(subIdx===curSub) return;
-  curSub=subIdx;
-  var p=profiles[subIdx];
-  if(!p) return;
-  // Move cursor line in heatmap (trace index 2)
+  var subIdx=Array.isArray(data.points[0].pointIndex)?data.points[0].pointIndex[1]:0;
+  if(subIdx===curSub) return; curSub=subIdx;
+  var p=profiles[subIdx]; if(!p) return;
   Plotly.restyle('mk-div',{{x:[[hd.x[subIdx],hd.x[subIdx]]]}},2);
-  // Update column
-  Plotly.react('col-div',colTraces(p),colLayout(p,hd.x[subIdx]));
+  Plotly.react('col-div',colTraces(p),colLayout(p,hd.x[subIdx]),{{responsive:true,displayModeBar:false}});
 }});
-</script>
-</body></html>"""
+</script></body></html>"""
+        components.html(mk_html, height=570, scrolling=False)
 
-    components.html(html, height=670, scrolling=False)
+    # ── Plotly subplot: T / obs_T / LWC / refreezing (shared x-axis) ──── #
+    _PLOTLY_PLOTS = ["Modelled temperature", "Observed temperature",
+                     "Liquid water content", "Cumulative refreezing",
+                     "Residual saturation"]
+    active_plotly = [p for p in _PLOTLY_PLOTS if p in show]
 
-    # ------------------------------------------------------------------ #
-    # Swiss grain-type legend
-    # ------------------------------------------------------------------ #
-    swatches = "".join(
-        f'<div style="display:flex;align-items:center;gap:4px;'
-        f'background:#f5f5f5;border-radius:4px;padding:3px 8px;white-space:nowrap">'
-        f'<div style="width:14px;height:14px;background:{color};border-radius:3px;'
-        f'flex-shrink:0;border:1px solid rgba(0,0,0,0.15)"></div>'
-        f'<span style="font-size:11px;color:#333">{name}</span></div>'
-        for code in sorted(MK_CATALOG.keys())
-        for color, name in [MK_CATALOG[code]]
-    )
-    st.markdown(
-        f'<div style="display:flex;flex-wrap:wrap;gap:6px;padding:6px 0">'
-        f'{swatches}</div>',
-        unsafe_allow_html=True,
-    )
+    if active_plotly:
+        # Load pro grids (cached — only once regardless of which plots are shown)
+        d          = load_pro(str(pro_path), _mtime=mtime)
+        times      = d["times"]
+        depth_grid = d["depth_grid"]
+        T_grid     = d["T_grid"]
+        LWC_grid   = d["LWC_grid"]
+        cumul_rf   = d["cumul_refreezing"]
+        soil_depth = d["soil_depth_m"]
+        t_dt       = times.to_pydatetime()
 
-    # ------------------------------------------------------------------ #
-    # Modelled temperature heatmap (full width — click to pin cursor)
-    # ------------------------------------------------------------------ #
-    d          = load_pro(str(pro_path), _mtime=mtime)
-    times      = d["times"]
-    depth_grid = d["depth_grid"]
-    T_grid     = d["T_grid"]
-    t_dt       = times.to_pydatetime()
+        # Log scale bounds for residual saturation coloraxis
+        _SAT_FLOOR   = 0.1          # % mass — floor for log transform
+        _SAT_MAX     = 6.0          # % mass — colorbar maximum
+        _SAT_LOG_MIN = np.log10(_SAT_FLOOR)
+        _SAT_LOG_MAX = np.log10(_SAT_MAX)
 
-    key_ti = f"ti_{sid}"
-    if key_ti not in st.session_state:
-        st.session_state[key_ti] = 0
-    ti = st.session_state[key_ti]
+        # Stride: at least hourly, but capped so heatmap never exceeds ~1000 columns
+        MAX_PLOT_TIMES = 1000
+        n_times = len(times)
+        if n_times > 1:
+            dt_sec   = (t_dt[1] - t_dt[0]).total_seconds()
+            raw_step = max(1, round(3600.0 / dt_sec))
+        else:
+            raw_step = 1
+        step = max(raw_step, n_times // MAX_PLOT_TIMES)
+        idx  = list(range(0, n_times, step))
+        t_sub    = [t_dt[i] for i in idx]
+        soil_sub = [float(soil_depth[i]) for i in idx]
 
-    # Compute shared colorscale limits from observed data (falls back to modelled)
-    obs = load_observed_temp(sid)
-    if obs is not None:
-        zmin_shared = max(float(np.nanmin(obs[2])) - 1.0, -30.0)
-    else:
-        zmin_shared = max(float(np.nanmin(T_grid)) - 1.0, -30.0)
+        # Observed T
+        want_obs = "Observed temperature" in show
+        obs = load_observed_temp(sid) if want_obs else None
+        has_obs = obs is not None
 
-    fig_T = go.Figure(go.Heatmap(
-        x=t_dt, y=depth_grid, z=T_grid.T,
-        colorscale="RdYlBu_r", zmin=zmin_shared, zmax=0,
-        colorbar=dict(title="°C", thickness=12),
-        hovertemplate="Date: %{x}<br>Depth: %{y:.2f} m<br>T: %{z:.2f} °C<extra></extra>",
-    ))
-    fig_T.add_vline(x=t_dt[ti], line=dict(color="white", width=2, dash="dot"))
-    fig_T.update_layout(
-        title=f"{sid} — Modelled firn temperature (click to pin cursor)",
-        yaxis=dict(title="Depth (m)", autorange="reversed"),
-        xaxis_title="Date", height=320,
-        margin=dict(l=55, r=10, t=35, b=55),
-        clickmode="event+select",
-    )
-    T_event = st.plotly_chart(fig_T, width="stretch",
-                              on_select="rerun", key=f"T_chart_{sid}")
-    if T_event and T_event.selection and T_event.selection.points:
-        cx = T_event.selection.points[0].get("x", "")
-        try:
-            cdt = (pd.Timestamp(int(cx), unit="ms") if isinstance(cx, (int, float))
-                   else pd.Timestamp(str(cx)[:16]))
-            nti = int(np.argmin(np.abs(times - cdt)))
-            if nti != st.session_state[key_ti]:
-                st.session_state[key_ti] = nti
-                st.rerun()
-        except Exception:
-            pass
+        if has_obs:
+            zmin_T = max(float(np.nanmin(obs[2])) - 1.0, -30.0)
+        else:
+            zmin_T = max(float(np.nanmin(T_grid)) - 1.0, -30.0)
 
-    # ------------------------------------------------------------------ #
-    # Observed temperature heatmap (full width)
-    # ------------------------------------------------------------------ #
-    if obs is not None:
-        obs_times, obs_depths, obs_T = obs
-        fig_obs = go.Figure(go.Heatmap(
-            x=obs_times.to_pydatetime(),
-            y=obs_depths,
-            z=obs_T.T,
-            colorscale="RdYlBu_r",
-            zmin=zmin_shared, zmax=0,
-            colorbar=dict(title="°C", thickness=12),
-            hovertemplate=(
-                "Date: %{x}<br>Depth: %{y:.2f} m<br>T: %{z:.2f} °C<extra></extra>"
-            ),
-        ))
-        fig_obs.update_layout(
-            title=f"{sid} — Observed firn temperature",
-            yaxis=dict(title="Depth (m)", autorange="reversed"),
-            xaxis_title="Date", height=320,
-            margin=dict(l=55, r=10, t=35, b=55),
+        # Build ordered row list (only selected plots, obs only if data exists)
+        plotly_rows = []
+        if "Modelled temperature" in show:
+            plotly_rows.append("mod_T")
+        if has_obs:
+            plotly_rows.append("obs_T")
+        if "Liquid water content" in show:
+            plotly_rows.append("LWC")
+        if "Cumulative refreezing" in show:
+            plotly_rows.append("RF")
+        if "Residual saturation" in show:
+            plotly_rows.append("RS")
+
+        row_map = {name: i + 1 for i, name in enumerate(plotly_rows)}
+        n_rows  = len(plotly_rows)
+        rh      = [1.0 / n_rows] * n_rows
+        # Give RF row a bit less height than heatmap rows
+        if n_rows > 1 and "RF" in row_map:
+            rf_frac = 0.55 / n_rows
+            hm_frac = (1.0 - rf_frac) / (n_rows - 1)
+            rh = [rf_frac if plotly_rows[i] == "RF" else hm_frac
+                  for i in range(n_rows)]
+        # RS (saturation heatmap) is shallower (5 m) so give it slightly less height
+        elif n_rows > 1 and "RS" in row_map and "RF" not in row_map:
+            rs_frac = 0.75 / n_rows
+            hm_frac = (1.0 - rs_frac) / (n_rows - 1)
+            rh = [rs_frac if plotly_rows[i] == "RS" else hm_frac
+                  for i in range(n_rows)]
+        fig_h = max(300, 260 * n_rows)
+
+        titles = []
+        for p in plotly_rows:
+            if p == "mod_T":  titles.append(f"{sid} — Modelled temperature")
+            elif p == "obs_T": titles.append(f"{sid} — Observed temperature")
+            elif p == "LWC":  titles.append(f"{sid} — Liquid water content")
+            elif p == "RF":   titles.append(f"{sid} — Cumulative refreezing")
+            elif p == "RS":   titles.append(f"{sid} — Residual saturation (Coléou & Lesaffre 1998)")
+
+        _LWC_CS = [
+            [0.00, "#ffffff"], [0.01, "#f7fbff"], [0.20, "#c6dbef"],
+            [0.50, "#6baed6"], [0.80, "#2171b5"], [0.99, "#08306b"], [1.00, "red"],
+        ]
+
+        fig = make_subplots(
+            rows=n_rows, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.04,
+            row_heights=rh,
+            subplot_titles=titles,
         )
-        st.plotly_chart(fig_obs, width="stretch", key=f"obs_T_chart_{sid}")
 
-    # ------------------------------------------------------------------ #
-    # Density heatmap + hover profile (self-contained HTML component)
-    # ------------------------------------------------------------------ #
+        max_depth = float(depth_grid.max())
+
+        def _zero_contour(x, y, z):
+            return go.Contour(
+                x=x, y=y, z=np.asarray(z, dtype=float),
+                showscale=False,
+                contours=dict(start=-0.2, end=-0.1, size=1,
+                              coloring="lines", showlabels=False),
+                colorscale=[[0, "white"], [1, "white"]],
+                line=dict(width=2.5),
+                hoverinfo="skip", showlegend=False, name="-0.2 °C",
+            )
+
+        if "mod_T" in row_map:
+            T_sub = T_grid[idx]
+            r = row_map["mod_T"]
+            fig.add_trace(go.Heatmap(
+                x=t_sub, y=depth_grid, z=T_sub.T,
+                coloraxis="coloraxis",
+                hovertemplate="Date: %{x}<br>Depth: %{y:.2f} m<br>T: %{z:.2f} °C<extra></extra>",
+            ), row=r, col=1)
+            fig.add_trace(_zero_contour(t_sub, depth_grid, T_sub.T), row=r, col=1)
+            fig.add_trace(go.Scatter(
+                x=t_sub, y=soil_sub, mode="lines",
+                line=dict(color="black", width=1), hoverinfo="skip", showlegend=False,
+            ), row=r, col=1)
+            fig.update_yaxes(title_text="Depth (m)", range=[max_depth, 0], row=r)
+
+        if "obs_T" in row_map:
+            obs_times, obs_depths, obs_T_arr = obs
+            obs_tdt  = obs_times.to_pydatetime()
+            n_obs    = len(obs_tdt)
+            obs_step = max(1, n_obs // MAX_PLOT_TIMES)
+            obs_idx  = list(range(0, n_obs, obs_step))
+            obs_t_sub   = [obs_tdt[i] for i in obs_idx]
+            obs_T_arr   = obs_T_arr[obs_idx]
+            r = row_map["obs_T"]
+            fig.add_trace(go.Heatmap(
+                x=obs_t_sub, y=obs_depths, z=obs_T_arr.T,
+                coloraxis="coloraxis",
+                hovertemplate="Date: %{x}<br>Depth: %{y:.2f} m<br>T: %{z:.2f} °C<extra></extra>",
+            ), row=r, col=1)
+            fig.add_trace(_zero_contour(obs_t_sub, obs_depths, obs_T_arr.T),
+                          row=r, col=1)
+            fig.update_yaxes(title_text="Depth (m)", range=[max_depth, 0], row=r)
+
+        if "LWC" in row_map:
+            LWC_sub = LWC_grid[idx]
+            r = row_map["LWC"]
+            fig.add_trace(go.Heatmap(
+                x=t_sub, y=depth_grid, z=LWC_sub.T,
+                coloraxis="coloraxis2",
+                hovertemplate="Date: %{x}<br>Depth: %{y:.2f} m<br>LWC: %{z:.2f}%<extra></extra>",
+            ), row=r, col=1)
+            fig.add_trace(go.Scatter(
+                x=t_sub, y=soil_sub, mode="lines",
+                line=dict(color="black", width=1), hoverinfo="skip", showlegend=False,
+            ), row=r, col=1)
+            fig.update_yaxes(title_text="Depth (m)", autorange="reversed", row=r)
+
+        if "RF" in row_map:
+            r = row_map["RF"]
+            fig.add_trace(go.Scatter(
+                x=t_dt, y=cumul_rf, mode="lines",
+                line=dict(color="#2980b9", width=2),
+                fill="tozeroy", fillcolor="rgba(41,128,185,0.15)",
+                hovertemplate="Date: %{x}<br>Cumul. refreezing: %{y:.1f} mm w.e.<extra></extra>",
+            ), row=r, col=1)
+            fig.update_yaxes(title_text="mm w.e.", rangemode="tozero", row=r)
+
+        if "RS" in row_map:
+            sat_d    = load_sat_grid(str(pro_path), _mtime=mtime)
+            depth_5m = sat_d["depth_5m"]
+            Sat_raw  = sat_d["Sat_grid"][idx]
+            # Log10-transform for display; floor at _SAT_FLOOR to avoid log(0)
+            Sat_log  = np.log10(np.clip(Sat_raw, _SAT_FLOOR, None))
+            # Isotherm from main T_grid (already loaded), clipped to 5 m
+            d5m      = depth_grid <= 5.0
+            T_sub_5m = T_grid[idx][:, d5m]
+            r = row_map["RS"]
+            fig.add_trace(go.Heatmap(
+                x=t_sub, y=depth_5m, z=Sat_log.T,
+                customdata=Sat_raw.T,
+                coloraxis="coloraxis3",
+                hovertemplate="Date: %{x}<br>Depth: %{y:.2f} m<br>W_irr: %{customdata:.2f} % mass<extra></extra>",
+            ), row=r, col=1)
+            fig.add_trace(_zero_contour(t_sub, depth_5m, T_sub_5m.T), row=r, col=1)
+            fig.update_yaxes(title_text="Depth (m)", range=[5.0, 0], row=r)
+
+        fig.update_xaxes(title_text="Date", row=n_rows)
+
+        # Colorbar y positions: centre on each heatmap row group
+        t_rows   = [row_map[k] for k in ("mod_T", "obs_T") if k in row_map]
+        lwc_rows = [row_map["LWC"]] if "LWC" in row_map else []
+        rs_rows  = [row_map["RS"]]  if "RS"  in row_map else []
+        cb_T_y   = 1.0 - (np.mean(t_rows)   - 0.5) / n_rows if t_rows   else 0.75
+        cb_LWC_y = 1.0 - (np.mean(lwc_rows) - 0.5) / n_rows if lwc_rows else 0.25
+        cb_SAT_y = 1.0 - (np.mean(rs_rows)  - 0.5) / n_rows if rs_rows  else 0.10
+
+        fig.update_layout(
+            height=fig_h,
+            margin=dict(l=70, r=90, t=35, b=55),
+            showlegend=False,
+            coloraxis=dict(
+                colorscale="Turbo",
+                cmin=zmin_T, cmax=0,
+                colorbar=dict(title="°C", thickness=12, x=1.02,
+                              len=0.45, y=cb_T_y),
+            ),
+            coloraxis2=dict(
+                colorscale=_LWC_CS,
+                cmin=0, cmax=10,
+                colorbar=dict(
+                    title="LWC %", thickness=12, x=1.02,
+                    len=0.30, y=cb_LWC_y,
+                    tickvals=[0, 2, 4, 6, 8, 10],
+                    ticktext=["0", "2", "4", "6", "8", "≥10"],
+                ),
+            ),
+            coloraxis3=dict(
+                colorscale="Blues",
+                cmin=_SAT_LOG_MIN, cmax=_SAT_LOG_MAX,
+                colorbar=dict(
+                    title="W_irr %", thickness=12, x=1.02,
+                    len=0.30, y=cb_SAT_y,
+                    tickvals=[np.log10(v) for v in [0.1, 0.3, 1.0, 3.0, 6.0]],
+                    ticktext=["0.1", "0.3", "1", "3", "6"],
+                ),
+            ),
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f"ts_chart_{sid}")
+
+    # ── Density heatmap + profile (self-contained HTML iframe) ────────── #
+    if "Density" not in show:
+        return
     den_payload = _build_density_payload(str(pro_path), _mtime=mtime)
-    sid_safe    = sid.replace("'", "\\'")
     den_html = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
+<html><head><meta charset="utf-8">
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
-<style>
-*{{box-sizing:border-box;margin:0;padding:0}}
+<style>*{{box-sizing:border-box;margin:0;padding:0}}
 body{{background:transparent;font-family:sans-serif;overflow:hidden}}
-#wrap{{display:flex;width:100%;height:500px;gap:4px}}
-#den-hm{{flex:3;min-width:0}}
-#den-prof{{flex:1;min-width:0}}
-</style>
-</head>
-<body>
+#wrap{{display:flex;width:100%;height:450px;gap:4px}}
+#den-hm{{flex:3;min-width:0}}#den-prof{{flex:1;min-width:0}}</style>
+</head><body>
 <div id="wrap"><div id="den-hm"></div><div id="den-prof"></div></div>
 <script>
 var PL={den_payload};
-var hd=PL.heatmap;
-var profiles=PL.profiles;
-var firstP=PL.first;
-var lastP=PL.last;
-
+var hd=PL.heatmap,profiles=PL.profiles,firstP=PL.first,lastP=PL.last;
 Plotly.newPlot('den-hm',[
   {{type:'heatmap',x:hd.x,y:hd.y,z:hd.z,
     colorscale:'Greys',reversescale:true,zmin:0,zmax:900,
@@ -930,123 +1232,47 @@ Plotly.newPlot('den-hm',[
     line:{{color:'black',width:1.5}},hoverinfo:'skip',showlegend:false}},
   {{type:'scatter',x:[hd.x[0],hd.x[0]],y:[0,hd.maxDepth],mode:'lines',
     line:{{color:'#e74c3c',width:2,dash:'dot'}},hoverinfo:'skip',showlegend:false}}
-],{{
-  title:{{text:'{sid_safe} — Firn density (hover for profile)',font:{{size:13}}}},
-  yaxis:{{title:'Depth (m)',autorange:'reversed'}},
-  xaxis:{{title:'Date'}},
-  height:500,margin:{{l:60,r:10,t:40,b:55}},
-  plot_bgcolor:'white'
+],{{title:{{text:'{title_safe} — Firn density (hover for profile)',font:{{size:13}}}},
+  yaxis:{{title:'Depth (m)',autorange:'reversed'}},xaxis:{{title:'Date'}},
+  height:450,margin:{{l:60,r:10,t:40,b:55}},plot_bgcolor:'white'
 }},{{responsive:true,displayModeBar:false}});
-
 function profTraces(p,label){{
-  var traces=[];
-  if(firstP) traces.push({{
-    type:'scatter',x:firstP.x,y:firstP.y,mode:'lines',
-    name:PL.t_first,
+  var tr=[];
+  if(firstP) tr.push({{type:'scatter',x:firstP.x,y:firstP.y,mode:'lines',name:PL.t_first,
     line:{{color:'#aaaaaa',width:1.5,dash:'dash'}},
-    hovertemplate:'%{{x:.0f}} kg/m³ @ %{{y:.2f}} m<extra>first</extra>'
-  }});
-  if(lastP) traces.push({{
-    type:'scatter',x:lastP.x,y:lastP.y,mode:'lines',
-    name:PL.t_last,
+    hovertemplate:'%{{x:.0f}} kg/m³ @ %{{y:.2f}} m<extra>first</extra>'}});
+  if(lastP) tr.push({{type:'scatter',x:lastP.x,y:lastP.y,mode:'lines',name:PL.t_last,
     line:{{color:'#e67e22',width:1.5,dash:'dash'}},
-    hovertemplate:'%{{x:.0f}} kg/m³ @ %{{y:.2f}} m<extra>last</extra>'
-  }});
-  if(p) traces.push({{
-    type:'scatter',x:p.x,y:p.y,mode:'lines',
-    name:label||'',
+    hovertemplate:'%{{x:.0f}} kg/m³ @ %{{y:.2f}} m<extra>last</extra>'}});
+  if(p) tr.push({{type:'scatter',x:p.x,y:p.y,mode:'lines',name:label||'',
     line:{{color:'#2c3e50',width:2}},
-    hovertemplate:'%{{x:.0f}} kg/m³ @ %{{y:.2f}} m<extra>hover</extra>'
-  }});
-  return traces;
+    hovertemplate:'%{{x:.0f}} kg/m³ @ %{{y:.2f}} m<extra>hover</extra>'}});
+  return tr;
 }}
-var profLayout={{
-  xaxis:{{title:'Density (kg/m³)',range:[200,920]}},
+var profLayout={{xaxis:{{title:'Density (kg/m³)',range:[200,920]}},
   yaxis:{{title:'Depth (m)',autorange:'reversed'}},
   legend:{{x:0,y:-0.12,orientation:'h',font:{{size:9}}}},
-  height:500,margin:{{l:55,r:10,t:40,b:75}},
-  plot_bgcolor:'white'
-}};
-
+  height:450,margin:{{l:55,r:10,t:40,b:75}},plot_bgcolor:'white'}};
 var p0=null,i0=0;
 for(var i=0;i<profiles.length;i++){{if(profiles[i]){{p0=profiles[i];i0=i;break;}}}}
-if(p0) Plotly.newPlot('den-prof',profTraces(p0,hd.x[i0]),profLayout,
-                      {{responsive:true,displayModeBar:false}});
-
+if(p0) Plotly.newPlot('den-prof',profTraces(p0,hd.x[i0]),profLayout,{{responsive:true,displayModeBar:false}});
 var curSub=-1;
 document.getElementById('den-hm').on('plotly_hover',function(data){{
   if(!data||!data.points||!data.points.length) return;
-  var pt=data.points[0];
-  var subIdx=Array.isArray(pt.pointIndex)?pt.pointIndex[1]:0;
-  if(subIdx===curSub) return;
-  curSub=subIdx;
-  var p=profiles[subIdx];
-  if(!p) return;
+  var subIdx=Array.isArray(data.points[0].pointIndex)?data.points[0].pointIndex[1]:0;
+  if(subIdx===curSub) return; curSub=subIdx;
+  var p=profiles[subIdx]; if(!p) return;
   Plotly.restyle('den-hm',{{x:[[hd.x[subIdx],hd.x[subIdx]]]}},2);
   Plotly.react('den-prof',profTraces(p,hd.x[subIdx]),profLayout);
 }});
-</script>
-</body></html>"""
-    components.html(den_html, height=520, scrolling=False)
-
-    # ------------------------------------------------------------------ #
-    # Liquid water content heatmap
-    # ------------------------------------------------------------------ #
-    # Custom colorscale: white→Blues for 0–10 %, red at the top (≥10 %)
-    _LWC_COLORSCALE = [
-        [0.00, "#ffffff"],
-        [0.01, "#f7fbff"],
-        [0.20, "#c6dbef"],
-        [0.50, "#6baed6"],
-        [0.80, "#2171b5"],
-        [0.99, "#08306b"],
-        [1.00, "red"],
-    ]
-    LWC_grid = d["LWC_grid"]
-    fig_lwc = go.Figure(go.Heatmap(
-        x=t_dt, y=depth_grid, z=LWC_grid.T,
-        colorscale=_LWC_COLORSCALE,
-        zmin=0, zmax=10,
-        colorbar=dict(title="LWC (%)", thickness=12,
-                      tickvals=[0, 2, 4, 6, 8, 10],
-                      ticktext=["0", "2", "4", "6", "8", "≥10"]),
-        hovertemplate="Date: %{x}<br>Depth: %{y:.2f} m<br>LWC: %{z:.2f}%<extra></extra>",
-    ))
-    fig_lwc.update_layout(
-        title=f"{sid} — Liquid water content (red ≥ 10%)",
-        yaxis=dict(title="Depth (m)", autorange="reversed"),
-        xaxis_title="Date", height=320,
-        margin=dict(l=55, r=10, t=35, b=55),
-    )
-    st.plotly_chart(fig_lwc, width="stretch", key=f"lwc_chart_{sid}")
-
-    # ------------------------------------------------------------------ #
-    # Cumulative refreezing time series
-    # ------------------------------------------------------------------ #
-    cumul_rf = d["cumul_refreezing"]
-    fig_rf = go.Figure()
-    fig_rf.add_trace(go.Scatter(
-        x=t_dt, y=cumul_rf,
-        mode="lines",
-        line=dict(color="#2980b9", width=2),
-        fill="tozeroy",
-        fillcolor="rgba(41,128,185,0.15)",
-        hovertemplate="Date: %{x}<br>Cumulative refreezing: %{y:.1f} mm w.e.<extra></extra>",
-    ))
-    fig_rf.update_layout(
-        title=f"{sid} — Cumulative refreezing in firn column",
-        xaxis_title="Date",
-        yaxis=dict(title="mm w.e.  (kg m⁻²)", rangemode="tozero"),
-        height=280,
-        margin=dict(l=65, r=10, t=35, b=55),
-    )
-    st.plotly_chart(fig_rf, width="stretch", key=f"rf_chart_{sid}")
+</script></body></html>"""
+    components.html(den_html, height=470, scrolling=False)
 
 
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_run, tab_settings, tab_results = st.tabs(["▶ Run", "⚙ Settings", "📊 Results"])
+tab_run, tab_settings, tab_results, tab_ovm = st.tabs(["▶ Run", "⚙ Settings", "📊 Results", "🌡 Obs vs Model"])
 
 # ============================================================
 # TAB 1 — Run
@@ -1170,14 +1396,26 @@ with tab_settings:
                 "Data root (blank = auto)", value=str(doc["paths"].get("data_root", "")))
 
             st.markdown("**Run**")
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             doc["run"]["run_until"] = c1.text_input(
                 "Default run_until (blank = full record)",
                 value=str(doc["run"].get("run_until", "")))
             doc["run"]["keep_last_n_sno"] = c2.number_input(
                 "Keep last N .sno files", value=int(doc["run"]["keep_last_n_sno"]),
                 min_value=1, step=1)
-            doc["run"]["keep_hourly_archives"] = st.checkbox(
+            _wt_options = ["adaptive", "BUCKET", "RICHARDSEQUATION"]
+            _wt_current = str(doc["run"].get("water_transport", "adaptive"))
+            doc["run"]["water_transport"] = c3.selectbox(
+                "Water transport",
+                options=_wt_options,
+                index=_wt_options.index(_wt_current) if _wt_current in _wt_options else 0)
+            c1, c2 = st.columns(2)
+            doc["run"]["assimilation_interval_h"] = c1.number_input(
+                "Assimilation interval (hours)",
+                value=int(doc["run"].get("assimilation_interval_h", 1)),
+                min_value=1, max_value=24, step=1,
+                help="Hours between temperature assimilation steps. Higher = faster runs, less frequent nudging.")
+            doc["run"]["keep_hourly_archives"] = c2.checkbox(
                 "Keep hourly .sno archives",
                 value=bool(doc["run"]["keep_hourly_archives"]))
 
@@ -1218,6 +1456,34 @@ with tab_settings:
             doc["basal"]["basal_temp_min_c"] = c3.number_input(
                 "Basal T min (°C)", value=float(doc["basal"]["basal_temp_min_c"]), step=1.0)
 
+            st.markdown("**ERA5 forcing adjustments** — applied via SMET `units_multiplier` / `units_offset`; physical = ERA5 × multiplier + offset")
+            if "forcing_adjustments" not in doc:
+                doc.add("forcing_adjustments", tomlkit.table())
+            fa = doc["forcing_adjustments"]
+            _fa_vars = [
+                ("ta",   "Air temp (°C)",      "TA"),
+                ("rh",   "Rel. humidity (–)",  "RH"),
+                ("vw",   "Wind speed (m/s)",   "VW"),
+                ("iswr", "Shortwave (W m⁻²)",  "ISWR"),
+                ("ilwr", "Longwave (W m⁻²)",   "ILWR"),
+                ("psum", "Precipitation (mm)", "PSUM"),
+            ]
+            _hdr = st.columns([2, 1, 1])
+            _hdr[0].markdown("Variable")
+            _hdr[1].markdown("Multiplier")
+            _hdr[2].markdown("Offset")
+            for _key, _label, _field in _fa_vars:
+                _c0, _c1, _c2 = st.columns([2, 1, 1])
+                _c0.markdown(_label)
+                fa[f"{_key}_multiplier"] = _c1.number_input(
+                    f"{_field} ×", label_visibility="collapsed",
+                    value=float(fa.get(f"{_key}_multiplier", 1.0)),
+                    step=0.05, format="%.3f", key=f"fa_{_key}_mult")
+                fa[f"{_key}_offset"] = _c2.number_input(
+                    f"{_field} +", label_visibility="collapsed",
+                    value=float(fa.get(f"{_key}_offset", 0.0)),
+                    step=0.1, format="%.3f", key=f"fa_{_key}_off")
+
             saved = st.form_submit_button("💾 Save settings", type="primary")
 
         if saved:
@@ -1248,3 +1514,56 @@ with tab_results:
             st.subheader("Static figures")
             for fig_path in figs:
                 st.image(str(fig_path), caption=fig_path.name, width="stretch")
+
+# ============================================================
+# TAB 4 — Obs vs Model (all sites)
+# ============================================================
+with tab_ovm:
+    import subprocess, sys
+    _OVM_SITES = [
+        ("T2 (2007)",         "T2_2007_obs_vs_model.png",        "T2_2007"),
+        ("T2 bucket (2007)", "T2_2007_bucket_obs_vs_model.png", "T2_2007_bucket"),
+        ("T2− (2019)",   "T2minus_obs_vs_model.png",  "T2minus"),
+        ("T3 (1794 m)",  "T3_obs_vs_model.png",       "T3"),
+        ("T4 (1873 m)",  "T4_obs_vs_model.png",       "T4"),
+        ("CP (1998 m)",  "CP_obs_vs_model.png",       "CP"),
+        ("UP18 (2109 m)","UP18_obs_vs_model.png",     "UP18"),
+    ]
+    _ovm_labels = [s[0] for s in _OVM_SITES]
+    _ovm_choice = st.radio("Site", _ovm_labels, horizontal=True)
+    _ovm_site   = next(s for s in _OVM_SITES if s[0] == _ovm_choice)
+    _ovm_fig    = APP_DIR / _ovm_site[1]
+    _ovm_key    = _ovm_site[2]
+
+    if _ovm_fig.exists():
+        st.image(str(_ovm_fig),
+                 caption=f"{_ovm_choice} — observed vs modelled firn temperature",
+                 width="stretch")
+    else:
+        st.info("Figure not generated yet.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Regenerate this site", key="ovm_regen"):
+            with st.spinner(f"Generating {_ovm_choice} …"):
+                result = subprocess.run(
+                    [sys.executable, str(APP_DIR / "plot_obs_vs_model.py"), _ovm_key],
+                    capture_output=True, text=True
+                )
+            if result.returncode == 0:
+                st.success("Done.")
+                st.rerun()
+            else:
+                st.error(result.stderr)
+    with col2:
+        if st.button("Regenerate all sites", key="ovm_regen_all"):
+            with st.spinner("Generating all sites …"):
+                result = subprocess.run(
+                    [sys.executable, str(APP_DIR / "plot_obs_vs_model.py")],
+                    capture_output=True, text=True
+                )
+            if result.returncode == 0:
+                st.success("All figures updated.")
+                st.rerun()
+            else:
+                st.error(result.stderr)
