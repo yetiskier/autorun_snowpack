@@ -222,7 +222,7 @@ def make_figure(site, t_start_override=None, t_end_override=None, max_depth=None
     h_iso    = mlines.Line2D([], [], color="white", linewidth=1.5, label="−0.05 °C isotherm")
     h_sensor = mlines.Line2D([], [], color="black", linewidth=0.5, alpha=0.4, label="Sensor depth")
     axes[0].legend(handles=[h_iso, h_sensor], fontsize=FS * 0.5,
-                   loc="center left", bbox_to_anchor=(1.01, 0.5),
+                   loc="upper left", bbox_to_anchor=(1.01, 1.0),
                    framealpha=0.7, facecolor="dimgray", labelcolor="white",
                    edgecolor="none")
 
