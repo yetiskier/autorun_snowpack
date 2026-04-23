@@ -193,7 +193,7 @@ _LOG_FILTER = (
     r"|Verify that the soil|If the snow|If the soil is|Try bucket scheme)"
 )
 
-def launch_run(year: int, site: str, depth: int, run_until: str) -> int:
+def launch_run(year: int, site: str, depth: int, run_until: str, fresh: bool = False) -> int:
     sid = site_id(year, site, depth)
     log = log_path(sid)
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -202,6 +202,8 @@ def launch_run(year: int, site: str, depth: int, run_until: str) -> int:
                "--site", site, "--year", str(year), "--depth", str(depth)]
     if run_until.strip():
         py_args += ["--run-until", run_until.strip()]
+    if fresh:
+        py_args += ["--fresh"]
 
     # Pipe through grep to strip SNOWPACK's verbose Richards-equation diagnostics
     py_cmd   = " ".join(shlex.quote(a) for a in py_args)
@@ -1398,6 +1400,18 @@ with tab_run:
         sid     = site_id(int(year), site, int(depth))
         running = is_running(sid)
 
+        # Default fresh=True when rerunning a completed run; False for incomplete
+        # (user may want to resume a crashed run from its checkpoint).
+        _group_sel = locals().get("_group", "")
+        _default_fresh = "Completed" in _group_sel or "Not yet" in _group_sel
+        fresh_start = st.checkbox(
+            "Fresh start (ignore checkpoint)",
+            value=_default_fresh,
+            help="Clear existing checkpoint and .pro output before launching. "
+                 "Always enable this when re-running a completed run.",
+            disabled=running,
+        )
+
         col_launch, col_kill = st.columns(2)
         with col_launch:
             launch = st.button("▶ Launch", disabled=running, use_container_width=True,
@@ -1406,7 +1420,7 @@ with tab_run:
             kill = st.button("⏹ Kill", disabled=not running, use_container_width=True)
 
         if launch:
-            pid = launch_run(int(year), site, int(depth), run_until)
+            pid = launch_run(int(year), site, int(depth), run_until, fresh=fresh_start)
             st.success(f"Started PID {pid}")
             time.sleep(1)
             st.rerun()

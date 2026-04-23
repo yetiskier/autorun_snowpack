@@ -180,6 +180,11 @@ def parse_args() -> argparse.Namespace:
                    help="Water transport scheme: 'adaptive' = BUCKET stabilisation then RE "
                         "(default); 'BUCKET' = BUCKET throughout; 'RICHARDSEQUATION' = RE "
                         "throughout (no stabilisation phase).")
+    p.add_argument("--fresh", action="store_true",
+                   help="Ignore any existing checkpoint and restart from the beginning of "
+                        "the temperature record. Clears initial_profile.sno from both disk "
+                        "and ramdisk, clears current_snow/, and removes the existing .pro "
+                        "output so the progress bar starts from zero.")
     return p.parse_args()
 
 
@@ -3272,6 +3277,29 @@ def main() -> None:
 
     temp_df, meta = read_tempconcatenated(TEMP_FILE, default_elevation_m=DEFAULT_ELEVATION_M)
     promice_df = read_promice(PROMICE_FILE)
+
+    # ── Fresh start: wipe checkpoints so resume detection finds nothing ─── #
+    if args.fresh:
+        _sid_str = f"{args.year}_{args.site}_{args.depth}m"
+        if args.run_tag:
+            _sid_str = f"{_sid_str}_{args.run_tag}"
+        _ram_dir = Path(f"/dev/shm/snowpack_{_sid_str}")
+        for _sno_path in [
+            INITIAL_SNO_FILE,
+            DISK_INPUT_DIR / "initial_profile.sno",
+            _ram_dir / "input" / "initial_profile.sno",
+        ]:
+            if _sno_path.exists():
+                _sno_path.unlink()
+        for _cs_dir in [CURRENT_SNOW_DIR, _ram_dir / "current_snow"]:
+            if _cs_dir.exists():
+                for _f in _cs_dir.glob("*.sno*"):
+                    _f.unlink()
+        # Remove old .pro so progress bar doesn't read stale data
+        _pro_glob = list(OUTPUT_DIR.glob("*.pro"))
+        for _pro in _pro_glob:
+            _pro.unlink()
+        print("Fresh start: checkpoints and previous output cleared.")
 
     # ── Detect resume checkpoint before doing any expensive setup ──────── #
     _resuming = False
