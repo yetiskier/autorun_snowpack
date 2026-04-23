@@ -1011,6 +1011,12 @@ document.getElementById('mk-div').on('plotly_hover',function(data){{
         soil_depth = d["soil_depth_m"]
         t_dt       = times.to_pydatetime()
 
+        # Log scale bounds for LWC coloraxis
+        _LWC_FLOOR   = 0.01         # % vol — floor for log transform
+        _LWC_MAX     = 10.0         # % vol — colorbar maximum
+        _LWC_LOG_MIN = np.log10(_LWC_FLOOR)
+        _LWC_LOG_MAX = np.log10(_LWC_MAX)
+
         # Log scale bounds for residual saturation coloraxis
         _SAT_FLOOR   = 0.1          # % mass — floor for log transform
         _SAT_MAX     = 6.0          # % mass — colorbar maximum
@@ -1139,11 +1145,13 @@ document.getElementById('mk-div').on('plotly_hover',function(data){{
 
         if "LWC" in row_map:
             LWC_sub = LWC_grid[idx]
+            LWC_log = np.log10(np.clip(LWC_sub, _LWC_FLOOR, None))
             r = row_map["LWC"]
             fig.add_trace(go.Heatmap(
-                x=t_sub, y=depth_grid, z=LWC_sub.T,
+                x=t_sub, y=depth_grid, z=LWC_log.T,
+                customdata=LWC_sub.T,
                 coloraxis="coloraxis2",
-                hovertemplate="Date: %{x}<br>Depth: %{y:.2f} m<br>LWC: %{z:.2f}%<extra></extra>",
+                hovertemplate="Date: %{x}<br>Depth: %{y:.2f} m<br>LWC: %{customdata:.2f}%<extra></extra>",
             ), row=r, col=1)
             fig.add_trace(go.Scatter(
                 x=t_sub, y=soil_sub, mode="lines",
@@ -1202,12 +1210,12 @@ document.getElementById('mk-div').on('plotly_hover',function(data){{
             ),
             coloraxis2=dict(
                 colorscale=_LWC_CS,
-                cmin=0, cmax=10,
+                cmin=_LWC_LOG_MIN, cmax=_LWC_LOG_MAX,
                 colorbar=dict(
                     title="LWC %", thickness=12, x=1.02,
                     len=0.30, y=cb_LWC_y,
-                    tickvals=[0, 2, 4, 6, 8, 10],
-                    ticktext=["0", "2", "4", "6", "8", "≥10"],
+                    tickvals=[np.log10(v) for v in [0.01, 0.1, 1.0, 5.0, 10.0]],
+                    ticktext=["0.01", "0.1", "1", "5", "≥10"],
                 ),
             ),
             coloraxis3=dict(
