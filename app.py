@@ -1302,8 +1302,11 @@ with tab_run:
         # --- Core selection ---
         available_cores = discover_cores()
 
-        def _label(y, s, d, d0, d1):
-            return f"{y} · {s} · {d} m    {d0} → {d1}"
+        def _label(y, s, d, d0, d1, t_done=None):
+            base = f"{y} · {s} · {d} m    {d0} → {d1}"
+            if t_done is not None:
+                base += f"  (completed {t_done:%Y-%m-%d})"
+            return base
 
         def _core_status(y, s, d):
             """Return 'running', 'incomplete', 'complete', or 'fresh'."""
@@ -1322,6 +1325,7 @@ with tab_run:
         cores_incomplete = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _statuses[(y, s, d)] == "incomplete"]
         cores_complete   = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _statuses[(y, s, d)] == "complete"]
         cores_fresh      = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _statuses[(y, s, d)] == "fresh"]
+        _complete_times  = {(y, s, d): get_pro_current_time(site_id(y, s, d)) for y, s, d, _, _ in cores_complete}
 
         use_custom = st.checkbox("Enter site manually", value=not bool(available_cores))
 
@@ -1350,7 +1354,10 @@ with tab_run:
                 _fallback = cores_fresh or cores_complete or available_cores
                 year, site, depth = _fallback[0][:3] if _fallback else (2022, "T3", 25)
             else:
-                _pool_labels = [_label(*c) for c in _pool]
+                if "Completed" in _group:
+                    _pool_labels = [_label(*c, t_done=_complete_times.get((c[0], c[1], c[2]))) for c in _pool]
+                else:
+                    _pool_labels = [_label(*c) for c in _pool]
                 chosen_label = st.selectbox("Core", _pool_labels,
                                             label_visibility="collapsed")
                 idx = _pool_labels.index(chosen_label)
