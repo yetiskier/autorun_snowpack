@@ -1325,7 +1325,18 @@ with tab_run:
         cores_incomplete = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _statuses[(y, s, d)] == "incomplete"]
         cores_complete   = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _statuses[(y, s, d)] == "complete"]
         cores_fresh      = [(y, s, d, d0, d1) for y, s, d, d0, d1 in available_cores if _statuses[(y, s, d)] == "fresh"]
-        _complete_times  = {(y, s, d): get_pro_current_time(site_id(y, s, d)) for y, s, d, _, _ in cores_complete}
+        def _run_completed_date(sid: str) -> "pd.Timestamp | None":
+            """Return the wall-clock date the run finished (log file mtime)."""
+            import datetime
+            lp = log_path(sid)
+            if lp.exists():
+                return pd.Timestamp(datetime.datetime.fromtimestamp(lp.stat().st_mtime))
+            pro = find_pro_file(sid)
+            if pro is not None and pro.exists():
+                return pd.Timestamp(datetime.datetime.fromtimestamp(pro.stat().st_mtime))
+            return None
+
+        _complete_times  = {(y, s, d): _run_completed_date(site_id(y, s, d)) for y, s, d, _, _ in cores_complete}
 
         use_custom = st.checkbox("Enter site manually", value=not bool(available_cores))
 
