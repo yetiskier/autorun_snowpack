@@ -3394,6 +3394,17 @@ def main() -> None:
             check=False,
         )
 
+    # Generate obs vs model temperature figure
+    ovm_script = Path(__file__).resolve().parent / "plot_obs_vs_model.py"
+    if ovm_script.exists():
+        _sid = f"{args.year}_{args.site}_{args.depth}m"
+        print(f"Generating obs vs model figure for {_sid} …")
+        subprocess.run(
+            [sys.executable, str(ovm_script), _sid],
+            cwd=str(Path(__file__).resolve().parent),
+            check=False,
+        )
+
     print("Done.")
 
 

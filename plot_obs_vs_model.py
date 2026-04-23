@@ -228,12 +228,54 @@ def make_figure(site):
     print(f"  Saved → {out}")
 
 
+def site_from_sid(sid: str) -> "dict | None":
+    """Build a site dict from a run directory sid (e.g. '2023_UP18_25m').
+
+    Discovers the .pro file automatically; used when autorun_snowpack.py
+    calls this script at the end of a completed run.
+    """
+    run_dir = SCRIPT_DIR / sid
+    if not run_dir.exists():
+        return None
+    out_dir = run_dir / "output"
+    pros = sorted(out_dir.glob("*.pro"), key=lambda p: p.stat().st_size, reverse=True) if out_dir.exists() else []
+    if not pros:
+        return None
+    pro = pros[0]  # largest .pro = most complete
+    # Derive human label from sid: "2023_UP18_25m" → "UP18 25 m (2023)"
+    parts = sid.split("_")
+    year  = parts[0] if parts[0].isdigit() else ""
+    depth = parts[-1] if parts[-1].endswith("m") else ""
+    name  = "_".join(p for p in parts[1:-1] if p != depth)
+    label = f"{name} {depth} ({year})" if year else sid
+    return dict(
+        key=sid,
+        sid=sid,
+        pro=str(pro.relative_to(SCRIPT_DIR)),
+        label=label,
+        out=f"{sid}_obs_vs_model.png",
+    )
+
+
 if __name__ == "__main__":
-    keys = set(sys.argv[1:])
-    targets = [s for s in SITES if not keys or s["key"] in keys]
-    if not targets:
-        print(f"Unknown key(s): {keys}. Valid: {[s['key'] for s in SITES]}")
-        sys.exit(1)
+    args = sys.argv[1:]
+    if not args:
+        targets = list(SITES)
+    else:
+        targets = []
+        for k in args:
+            match = next((s for s in SITES if s["key"] == k), None)
+            if match:
+                targets.append(match)
+            else:
+                # Try as a raw sid (e.g. "2023_UP18_25m")
+                site = site_from_sid(k)
+                if site:
+                    targets.append(site)
+                else:
+                    print(f"Unknown key/sid '{k}'. Known keys: {[s['key'] for s in SITES]}")
+                    sys.exit(1)
+
     for site in targets:
         print(f"\n── {site['label']} ──")
         try:
