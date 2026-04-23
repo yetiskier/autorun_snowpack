@@ -51,7 +51,9 @@ def load_surface_change(sid):
     return s
 
 
-def load_observed(sid):
+def load_observed(sid, depth_grid=None):
+    if depth_grid is None:
+        depth_grid = DEPTH_GRID
     csv = TEMP_DIR / f"{sid}_Tempconcatenated.csv"
     df  = pd.read_csv(csv, skiprows=4, index_col=0, parse_dates=True)
     valid = {}
@@ -69,7 +71,7 @@ def load_observed(sid):
 
     surf = load_surface_change(sid).reindex(times.normalize()).ffill().fillna(0.0).to_numpy()
 
-    grid = np.full((len(times), len(DEPTH_GRID)), np.nan)
+    grid = np.full((len(times), len(depth_grid)), np.nan)
     for ti in range(len(times)):
         adj = nominal_depths + surf[ti]
         row = arr[ti]
@@ -78,7 +80,7 @@ def load_observed(sid):
             continue
         f = interp1d(adj[vm], row[vm], kind="linear",
                      bounds_error=False, fill_value=np.nan)
-        grid[ti] = f(DEPTH_GRID)
+        grid[ti] = f(depth_grid)
 
     sensor_depths = nominal_depths[:, None] + surf[None, :]
     return times, grid, sensor_depths
@@ -114,9 +116,11 @@ def parse_pro(path):
     return pd.DatetimeIndex(times), pro
 
 
-def load_modelled(pro_path):
+def load_modelled(pro_path, depth_grid=None):
+    if depth_grid is None:
+        depth_grid = DEPTH_GRID
     times, pro = parse_pro(pro_path)
-    grid = np.full((len(times), len(DEPTH_GRID)), np.nan)
+    grid = np.full((len(times), len(depth_grid)), np.nan)
     for ti in range(len(times)):
         h = pro[501][ti]
         t = pro[503][ti]
@@ -132,19 +136,22 @@ def load_modelled(pro_path):
         t_rev   = t_s[::-1]
         f = interp1d(dm_rev, t_rev, kind="linear",
                      bounds_error=False, fill_value=np.nan)
-        grid[ti] = f(DEPTH_GRID)
+        grid[ti] = f(depth_grid)
     return times, grid
 
 
-def make_figure(site, t_start_override=None, t_end_override=None):
+def make_figure(site, t_start_override=None, t_end_override=None, max_depth=None):
     sid   = site["sid"]
     label = site["label"]
     out   = SCRIPT_DIR / site["out"]
 
+    plot_max_depth = float(max_depth) if max_depth is not None else MAX_DEPTH
+    depth_grid = np.arange(0.0, plot_max_depth + 0.05, 0.05)
+
     print(f"  Loading observed ({sid}) …")
-    obs_times, obs_grid, sensor_depths = load_observed(sid)
+    obs_times, obs_grid, sensor_depths = load_observed(sid, depth_grid=depth_grid)
     print(f"  Loading modelled …")
-    mod_times, mod_grid = load_modelled(SCRIPT_DIR / site["pro"])
+    mod_times, mod_grid = load_modelled(SCRIPT_DIR / site["pro"], depth_grid=depth_grid)
 
     # Auto-detect overlapping time window, then apply any user overrides
     t_start = max(obs_times[0],  mod_times[0])
@@ -182,12 +189,12 @@ def make_figure(site, t_start_override=None, t_end_override=None):
 
     for ax, title, (t_num, grid) in zip(axes, panel_titles, grids):
         Z = np.ma.masked_invalid(grid.T)
-        ax.contourf(t_num, DEPTH_GRID, Z,
+        ax.contourf(t_num, depth_grid, Z,
                     levels=boundaries, cmap=cmap, norm=norm, extend="max")
-        ax.contour(t_num, DEPTH_GRID, Z,
+        ax.contour(t_num, depth_grid, Z,
                    levels=[-0.05], colors="white", linewidths=1.5)
         ax.set_xlim(x_min, x_max)
-        ax.set_ylim(MAX_DEPTH, 0)
+        ax.set_ylim(plot_max_depth, 0)
         ax.yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(2))
         ax.yaxis.set_minor_locator(matplotlib.ticker.MultipleLocator(1))
         ax.tick_params(axis="y", labelsize=FS * 0.56)
@@ -199,7 +206,7 @@ def make_figure(site, t_start_override=None, t_end_override=None):
                           facecolor="black", alpha=0.35, linewidth=0))
 
     for sd in sensor_depths_w:
-        d = np.where((sd >= 0) & (sd <= MAX_DEPTH), sd, np.nan)
+        d = np.where((sd >= 0) & (sd <= plot_max_depth), sd, np.nan)
         axes[0].plot(sd_t_num, d, color="black", linewidth=0.5,
                      linestyle="-", alpha=0.4, zorder=5)
 
@@ -272,6 +279,8 @@ if __name__ == "__main__":
                         help="Restrict figure to dates on/after this date.")
     parser.add_argument("--end",   default=None, metavar="YYYY-MM-DD",
                         help="Restrict figure to dates on/before this date.")
+    parser.add_argument("--max-depth", type=float, default=None, metavar="M",
+                        help=f"Maximum depth to plot in metres (default: {MAX_DEPTH}).")
     cli = parser.parse_args()
 
     if not cli.sites:
@@ -293,6 +302,7 @@ if __name__ == "__main__":
     for site in targets:
         print(f"\n── {site['label']} ──")
         try:
-            make_figure(site, t_start_override=cli.start, t_end_override=cli.end)
+            make_figure(site, t_start_override=cli.start, t_end_override=cli.end,
+                        max_depth=cli.max_depth)
         except Exception as e:
             print(f"  ERROR: {e}")

@@ -1656,17 +1656,20 @@ with tab_ovm:
     st.markdown("---")
 
     with st.expander("Regenerate this site", expanded=False):
-        _rc1, _rc2 = st.columns(2)
-        _ovm_start = _rc1.date_input("Start date (optional)", value=None,
-                                     key="ovm_start")
-        _ovm_end   = _rc2.date_input("End date (optional)",   value=None,
-                                     key="ovm_end")
+        _rc1, _rc2, _rc3 = st.columns(3)
+        _ovm_start     = _rc1.date_input("Start date (optional)", value=None,
+                                         key="ovm_start")
+        _ovm_end       = _rc2.date_input("End date (optional)",   value=None,
+                                         key="ovm_end")
+        _ovm_max_depth = _rc3.number_input("Max depth (m)", value=10.0, min_value=1.0,
+                                           max_value=100.0, step=1.0, key="ovm_max_depth")
         if st.button("▶ Regenerate", key="ovm_regen"):
             _cmd = [_sys.executable, str(APP_DIR / "plot_obs_vs_model.py"), _ovm_key]
             if _ovm_start:
                 _cmd += ["--start", str(_ovm_start)]
             if _ovm_end:
                 _cmd += ["--end", str(_ovm_end)]
+            _cmd += ["--max-depth", str(_ovm_max_depth)]
             with st.spinner(f"Generating {_ovm_choice} …"):
                 _result = subprocess.run(_cmd, capture_output=True, text=True)
             if _result.returncode == 0:
