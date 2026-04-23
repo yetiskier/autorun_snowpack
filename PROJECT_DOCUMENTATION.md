@@ -549,7 +549,14 @@ Two adaptive RE runs exist side-by-side:
 - **Dynamic θᵣ:** `output/2019-T2minus-32m_TEMP_ASSIM_RUN.pro` (current, Coléou)
 Checkpoint backup: `current_snow_backup_fixed_theta_r/`, `input/initial_profile_checkpoint_backup.sno`.
 
-**Critical: how to force a fresh run**
+**Fresh start from the app**
+"Fresh start (ignore checkpoint)" checkbox appears above the Launch button. Defaults to checked for Completed/Not-yet-run selections, unchecked for Incomplete/crashed (resume is usually preferred there).
+
+A paired radio then asks: **Archive (keep a compressed copy)** or **Delete permanently**. Archive creates `output/archives/run_YYYYMMDD_HHMMSS.tar.gz` containing the previous `.pro`, `.ini`, and `autorun.log`. This is the recommended default — it preserves a record of how different setups affect results.
+
+CLI equivalent: `--fresh --fresh-mode archive|delete`
+
+**Critical: how to force a fresh run manually**
 The checkpoint lives in two places — both must be cleared before relaunching:
 1. `<site>/input/initial_profile.sno`
 2. `/dev/shm/snowpack_<sid>/input/initial_profile.sno` (ramdisk — setup only copies if not already present, so it persists across runs if not explicitly cleared)
