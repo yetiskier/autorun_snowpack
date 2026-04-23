@@ -493,3 +493,82 @@ Added a new daemon stdin command: `SETTEMPS i0:T0,i1:T1,...`
 - Cycle loop tracks `_pending_adjustments` (set each step) and `_settemps_steps_since_sno_write` counter.
 - Both are reset to `None / 0` after any `daemon.respawn()` call.
 - Disk-sync (RAM disk → real disk) skipped when SETTEMPS was used (SNO not written that step).
+
+---
+
+## Update — 2026-04-23 (App improvements: completion date, LWC log scale, obs vs model tab)
+
+### Run completion date in dropdown
+- `_run_completed_date(sid)` uses `log_path(sid).stat().st_mtime` (wall-clock time the log was last written) rather than the last model timestep in the .pro file.
+- `_label()` updated to accept `t_done` kwarg; appends `" (completed YYYY-MM-DD)"` suffix to dropdown labels for completed runs.
+
+### LWC interactive plot — log scale
+- LWC data pre-transformed with `np.log10(np.clip(..., _LWC_FLOOR, None))` before passing to Plotly.
+- `customdata` carries the raw (linear) values for hover display.
+- Explicit tick labels at 0.01, 0.1, 1, 5, ≥10 kg m⁻².
+
+### Obs vs Model tab — auto-discovery and controls
+- `_OVM_HARDCODED`: list of 7 known sites with hand-written labels.
+- Auto-discovery loop appends any `sites_with_results()` entries not already in the hardcoded list as `_ovm_extra`.
+- `_OVM_ALL = _OVM_HARDCODED + _ovm_extra`: radio selector covers all completed runs.
+- "Regenerate this site" expander has three columns: start date, end date, max depth (default 10 m). Passes `--start`, `--end`, `--max-depth` to `plot_obs_vs_model.py` subprocess.
+- Auto-generation at end of run: `autorun_snowpack.py` calls `plot_obs_vs_model.py <sid>` via subprocess after `main()` completes.
+
+### Obs vs Model figure layout
+- `figsize` reduced from `(20, 16)` to `(20, 11.2)` (−30% height per subplot).
+- Legend repositioned to `bbox_to_anchor=(1.01, 1.0)` so top of legend aligns with top of upper subplot.
+- `make_figure()` signature extended: `make_figure(site, t_start_override, t_end_override, max_depth)`.
+- `load_observed` and `load_modelled` both accept `depth_grid` kwarg built from `max_depth`.
+- `site_from_sid(sid)`: auto-discovers the largest `.pro` file in `output/`, derives human label from sid string. Used when autorun calls the script at end of run.
+
+---
+
+## Update — 2026-04-23 (SNOWPACK patched source files in repo; RE density-dependent θᵣ)
+
+### Patched source files now tracked in repo
+- `snowpack/Main.cc` — SETTEMPS + daemon patch (already present).
+- `snowpack/vanGenuchten.cc` — new: density-dependent residual saturation (see below).
+- `snowpack/build_snowpack.sh` — updated to copy both files into the SNOWPACK source tree before building.
+
+### RE density-dependent residual saturation (`vanGenuchten.cc`)
+Modified `SetVGParamsSnow()` in `vanGenuchten.cc` to replace the hard-coded `0.02` cap on `theta_r` with `ElementData::snowResidualWaterContent(EMS->theta[ICE])` — the same Coléou & Lesaffre (1998) formula BUCKET already uses. Added `#include <snowpack/DataClasses.h>`.
+
+**Effect by density:**
+- Low-density firn (~400 kg/m³): θᵣ ≈ 0.05–0.08 (was capped at 0.02)
+- High-density ice (>850 kg/m³): θᵣ ≈ 0.027, but clamped to `θ_water − ε` so effectively near zero for dry/dense layers
+
+Recompiled: `/home/yeti/snowmodel/snowpack-master/bin/snowpack`.
+
+---
+
+## Update — 2026-04-23 (T2minus RE comparison runs and LWC analysis)
+
+### Comparison runs for 2019_T2minus_32m
+Two adaptive RE runs exist side-by-side:
+- **Fixed θᵣ:** `output/2019-T2minus-32m_TEMP_ASSIM_RUN_RE_fixed_theta_r.pro`
+- **Dynamic θᵣ:** `output/2019-T2minus-32m_TEMP_ASSIM_RUN.pro` (current, Coléou)
+Checkpoint backup: `current_snow_backup_fixed_theta_r/`, `input/initial_profile_checkpoint_backup.sno`.
+
+**Critical: how to force a fresh run**
+The checkpoint lives in two places — both must be cleared before relaunching:
+1. `<site>/input/initial_profile.sno`
+2. `/dev/shm/snowpack_<sid>/input/initial_profile.sno` (ramdisk — setup only copies if not already present, so it persists across runs if not explicitly cleared)
+
+**Critical: always use `adaptive` for these sites, not `--water-transport RICHARDSEQUATION`**
+Pure RE from step 0 crashes immediately on melt-season spinup (SOLVER DUMP flood, 3.5M lines, Python timeout after 900s on step 1). The original runs all used adaptive mode (BUCKET for first ~2 weeks, then RE). Rate with adaptive: ~6.5 steps/s, total ~5 min for 1819 steps.
+
+### Comparison scripts
+- `compare_RE_theta_r.py` — 4-panel: temperature and LWC for both runs
+- `compare_LWC.py` — 3-panel: fixed LWC, dynamic LWC, ΔLWC difference (log scale + RdBu_r)
+- `check_density_vs_diff.py` — 3-panel: density, ice fraction, ΔLWC
+
+### LWC difference analysis results
+Correlation of ΔLWC (dynamic − fixed) with density over 365,619 valid pixels:
+- Pearson r = +0.42, Spearman ρ = +0.24
+
+**Unexpected finding:** Blue regions (dynamic has *less* LWC) are concentrated in **low-density firn** (300–750 kg/m³), not high-density ice. Mean ΔLWC by bin:
+- 300–450 kg/m³: −0.148 (61% blue)
+- 450–650 kg/m³: −0.07 to −0.08 (50–56% blue)
+- 750–917 kg/m³: +0.07 to +0.11 (44–46% blue)
+
+**Working hypothesis:** Higher θᵣ in low-density firn reclassifies water as immobile residual, altering percolation routing — water that pooled in low-density layers in the fixed run is redistributed or drains faster in the dynamic run. Mechanism not fully resolved.
