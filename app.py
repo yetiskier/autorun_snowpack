@@ -1610,51 +1610,79 @@ with tab_results:
 # TAB 4 — Obs vs Model (all sites)
 # ============================================================
 with tab_ovm:
-    import subprocess, sys
-    _OVM_SITES = [
-        ("T2 (2007)",         "T2_2007_obs_vs_model.png",        "T2_2007"),
-        ("T2 bucket (2007)", "T2_2007_bucket_obs_vs_model.png", "T2_2007_bucket"),
-        ("T2− (2019)",   "T2minus_obs_vs_model.png",  "T2minus"),
-        ("T3 (1794 m)",  "T3_obs_vs_model.png",       "T3"),
-        ("T4 (1873 m)",  "T4_obs_vs_model.png",       "T4"),
-        ("CP (1998 m)",  "CP_obs_vs_model.png",       "CP"),
-        ("UP18 (2109 m)","UP18_obs_vs_model.png",     "UP18"),
+    import subprocess, sys as _sys
+
+    # Hardcoded entries: nice labels + legacy keys for older figures.
+    # (label, png_filename, plot_key, sid)
+    _OVM_HARDCODED = [
+        ("T2 (2007)",        "T2_2007_obs_vs_model.png",        "T2_2007",        "2007_T2_10m"),
+        ("T2 bucket (2007)", "T2_2007_bucket_obs_vs_model.png", "T2_2007_bucket", "2007_T2_10m"),
+        ("T2− (2019)",       "T2minus_obs_vs_model.png",        "T2minus",        "2019_T2minus_32m"),
+        ("T3 (1794 m)",      "T3_obs_vs_model.png",             "T3",             "2022_T3_25m"),
+        ("T4 (1873 m)",      "T4_obs_vs_model.png",             "T4",             "2022_T4_25m"),
+        ("CP (1998 m)",      "CP_obs_vs_model.png",             "CP",             "2023_CP_25m"),
+        ("UP18 (2109 m)",    "UP18_obs_vs_model.png",           "UP18",           "2023_UP18_25m"),
     ]
-    _ovm_labels = [s[0] for s in _OVM_SITES]
-    _ovm_choice = st.radio("Site", _ovm_labels, horizontal=True)
-    _ovm_site   = next(s for s in _OVM_SITES if s[0] == _ovm_choice)
-    _ovm_fig    = APP_DIR / _ovm_site[1]
-    _ovm_key    = _ovm_site[2]
+    _hardcoded_sids = {e[3] for e in _OVM_HARDCODED}
+
+    # Auto-discover any completed run not already in the hardcoded list.
+    _ovm_extra = []
+    for _sid in sites_with_results():
+        if _sid in _hardcoded_sids:
+            continue
+        _parts = _sid.split("_")
+        _year  = _parts[0] if _parts[0].isdigit() else ""
+        _depth = _parts[-1] if _parts[-1].endswith("m") else ""
+        _name  = "_".join(p for p in _parts[1:-1])
+        _lbl   = f"{_name} {_depth} ({_year})" if _year else _sid
+        _ovm_extra.append((_lbl, f"{_sid}_obs_vs_model.png", _sid, _sid))
+
+    _OVM_ALL = _OVM_HARDCODED + _ovm_extra
+    _ovm_labels = [e[0] for e in _OVM_ALL]
+
+    _ovm_choice = st.radio("Site", _ovm_labels, horizontal=True,
+                           key="ovm_site_radio")
+    _ovm_entry  = next(e for e in _OVM_ALL if e[0] == _ovm_choice)
+    _ovm_fig    = APP_DIR / _ovm_entry[1]
+    _ovm_key    = _ovm_entry[2]   # key or sid passed to plot_obs_vs_model.py
 
     if _ovm_fig.exists():
         st.image(str(_ovm_fig),
                  caption=f"{_ovm_choice} — observed vs modelled firn temperature",
                  width="stretch")
     else:
-        st.info("Figure not generated yet.")
+        st.info("Figure not yet generated — use Regenerate below.")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Regenerate this site", key="ovm_regen"):
+    st.markdown("---")
+
+    with st.expander("Regenerate this site", expanded=False):
+        _rc1, _rc2 = st.columns(2)
+        _ovm_start = _rc1.date_input("Start date (optional)", value=None,
+                                     key="ovm_start")
+        _ovm_end   = _rc2.date_input("End date (optional)",   value=None,
+                                     key="ovm_end")
+        if st.button("▶ Regenerate", key="ovm_regen"):
+            _cmd = [_sys.executable, str(APP_DIR / "plot_obs_vs_model.py"), _ovm_key]
+            if _ovm_start:
+                _cmd += ["--start", str(_ovm_start)]
+            if _ovm_end:
+                _cmd += ["--end", str(_ovm_end)]
             with st.spinner(f"Generating {_ovm_choice} …"):
-                result = subprocess.run(
-                    [sys.executable, str(APP_DIR / "plot_obs_vs_model.py"), _ovm_key],
-                    capture_output=True, text=True
-                )
-            if result.returncode == 0:
+                _result = subprocess.run(_cmd, capture_output=True, text=True)
+            if _result.returncode == 0:
                 st.success("Done.")
                 st.rerun()
             else:
-                st.error(result.stderr)
-    with col2:
-        if st.button("Regenerate all sites", key="ovm_regen_all"):
-            with st.spinner("Generating all sites …"):
-                result = subprocess.run(
-                    [sys.executable, str(APP_DIR / "plot_obs_vs_model.py")],
-                    capture_output=True, text=True
-                )
-            if result.returncode == 0:
-                st.success("All figures updated.")
-                st.rerun()
-            else:
-                st.error(result.stderr)
+                st.error(_result.stderr)
+
+    if st.button("Regenerate all sites", key="ovm_regen_all"):
+        with st.spinner("Generating all sites …"):
+            _result = subprocess.run(
+                [_sys.executable, str(APP_DIR / "plot_obs_vs_model.py")],
+                capture_output=True, text=True,
+            )
+        if _result.returncode == 0:
+            st.success("All figures updated.")
+            st.rerun()
+        else:
+            st.error(_result.stderr)

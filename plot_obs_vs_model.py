@@ -6,6 +6,7 @@ Usage:
     python plot_obs_vs_model.py T3 CP        # specific sites by key
 """
 
+import argparse
 import sys
 from pathlib import Path
 import numpy as np
@@ -135,7 +136,7 @@ def load_modelled(pro_path):
     return times, grid
 
 
-def make_figure(site):
+def make_figure(site, t_start_override=None, t_end_override=None):
     sid   = site["sid"]
     label = site["label"]
     out   = SCRIPT_DIR / site["out"]
@@ -145,9 +146,13 @@ def make_figure(site):
     print(f"  Loading modelled …")
     mod_times, mod_grid = load_modelled(SCRIPT_DIR / site["pro"])
 
-    # Auto-detect overlapping time window
+    # Auto-detect overlapping time window, then apply any user overrides
     t_start = max(obs_times[0],  mod_times[0])
     t_end   = min(obs_times[-1], mod_times[-1])
+    if t_start_override is not None:
+        t_start = max(t_start, pd.Timestamp(t_start_override))
+    if t_end_override is not None:
+        t_end   = min(t_end,   pd.Timestamp(t_end_override))
 
     obs_mask = (obs_times >= t_start) & (obs_times <= t_end)
     mod_mask = (mod_times >= t_start) & (mod_times <= t_end)
@@ -168,7 +173,7 @@ def make_figure(site):
     x_min = min(obs_t[0],  mod_t[0])
     x_max = max(obs_t[-1], mod_t[-1])
 
-    fig, axes = plt.subplots(2, 1, figsize=(20, 16),
+    fig, axes = plt.subplots(2, 1, figsize=(20, 11.2),
                              sharex=True,
                              gridspec_kw={"hspace": 0.08})
 
@@ -258,17 +263,26 @@ def site_from_sid(sid: str) -> "dict | None":
 
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
-    if not args:
+    parser = argparse.ArgumentParser(
+        description="Generate observed vs modelled temperature figures.")
+    parser.add_argument("sites", nargs="*",
+                        help="Site keys (e.g. T3) or sids (e.g. 2023_UP18_25m). "
+                             "Omit to regenerate all known sites.")
+    parser.add_argument("--start", default=None, metavar="YYYY-MM-DD",
+                        help="Restrict figure to dates on/after this date.")
+    parser.add_argument("--end",   default=None, metavar="YYYY-MM-DD",
+                        help="Restrict figure to dates on/before this date.")
+    cli = parser.parse_args()
+
+    if not cli.sites:
         targets = list(SITES)
     else:
         targets = []
-        for k in args:
+        for k in cli.sites:
             match = next((s for s in SITES if s["key"] == k), None)
             if match:
                 targets.append(match)
             else:
-                # Try as a raw sid (e.g. "2023_UP18_25m")
                 site = site_from_sid(k)
                 if site:
                     targets.append(site)
@@ -279,6 +293,6 @@ if __name__ == "__main__":
     for site in targets:
         print(f"\n── {site['label']} ──")
         try:
-            make_figure(site)
+            make_figure(site, t_start_override=cli.start, t_end_override=cli.end)
         except Exception as e:
             print(f"  ERROR: {e}")
