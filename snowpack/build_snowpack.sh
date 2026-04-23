@@ -128,11 +128,14 @@ Download MeteoIO 2.10.0 from: https://code.wsl.ch/snow-models/meteoio/-/releases
 fi
 
 # ---------------------------------------------------------------------------
-# Step 3 — Apply patched Main.cc
+# Step 3 — Apply patched source files
 # ---------------------------------------------------------------------------
 
 info "Applying patched Main.cc …"
 cp "$SCRIPT_DIR/Main.cc" "$SNOWPACK_SRC/applications/snowpack/Main.cc"
+
+info "Applying patched vanGenuchten.cc …"
+cp "$SCRIPT_DIR/vanGenuchten.cc" "$SNOWPACK_SRC/snowpack/vanGenuchten.cc"
 
 # ---------------------------------------------------------------------------
 # Step 4 — Build SNOWPACK
