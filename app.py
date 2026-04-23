@@ -1433,6 +1433,10 @@ with tab_run:
             kill = st.button("⏹ Kill", disabled=not running, use_container_width=True)
 
         if launch:
+            if fresh_start:
+                if "fresh_launch_times" not in st.session_state:
+                    st.session_state["fresh_launch_times"] = {}
+                st.session_state["fresh_launch_times"][sid] = time.time()
             pid = launch_run(int(year), site, int(depth), run_until,
                              fresh=fresh_start, fresh_mode=fresh_mode)
             st.success(f"Started PID {pid}")
@@ -1466,6 +1470,13 @@ with tab_run:
         # Progress bar
         t_start, t_end = get_expected_date_range(sid)
         t_cur = get_pro_current_time(sid)
+        # Suppress stale .pro data if a fresh run was launched this session
+        # but the subprocess hasn't written new output yet.
+        _fresh_t = st.session_state.get("fresh_launch_times", {}).get(sid)
+        if _fresh_t and t_cur is not None:
+            _pro = find_pro_file(sid)
+            if _pro and _pro.exists() and _pro.stat().st_mtime < _fresh_t:
+                t_cur = None
         if t_start and t_end and t_cur:
             total_s   = (t_end   - t_start).total_seconds()
             elapsed_s = (t_cur   - t_start).total_seconds()
