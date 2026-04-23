@@ -183,8 +183,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fresh", action="store_true",
                    help="Ignore any existing checkpoint and restart from the beginning of "
                         "the temperature record. Clears initial_profile.sno from both disk "
-                        "and ramdisk, clears current_snow/, and removes the existing .pro "
-                        "output so the progress bar starts from zero.")
+                        "and ramdisk, clears current_snow/, and archives or removes the "
+                        "existing .pro output so the progress bar starts from zero.")
+    p.add_argument("--fresh-mode", default="archive", choices=["archive", "delete"],
+                   help="What to do with the previous .pro/.ini/log output when --fresh is "
+                        "set. 'archive' (default) creates a timestamped .tar.gz in "
+                        "output/archives/. 'delete' removes the files.")
     return p.parse_args()
 
 
@@ -3284,6 +3288,33 @@ def main() -> None:
         if args.run_tag:
             _sid_str = f"{_sid_str}_{args.run_tag}"
         _ram_dir = Path(f"/dev/shm/snowpack_{_sid_str}")
+
+        # ── Archive or delete previous output ──────────────────────────── #
+        _files_to_clear = (
+            list(OUTPUT_DIR.glob("*.pro"))
+            + list(OUTPUT_DIR.glob("*.ini"))
+            + ([PROJECT_DIR / "autorun.log"] if (PROJECT_DIR / "autorun.log").exists() else [])
+        )
+        _files_to_clear = [f for f in _files_to_clear if f.exists()]
+
+        if _files_to_clear:
+            if args.fresh_mode == "archive":
+                import tarfile as _tarfile
+                from datetime import datetime as _dt
+                _archive_dir = OUTPUT_DIR / "archives"
+                _archive_dir.mkdir(exist_ok=True)
+                _stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+                _archive_path = _archive_dir / f"run_{_stamp}.tar.gz"
+                with _tarfile.open(_archive_path, "w:gz") as _tar:
+                    for _f in _files_to_clear:
+                        _tar.add(_f, arcname=_f.name)
+                print(f"Fresh start: archived previous output → {_archive_path.name}")
+            else:
+                for _f in _files_to_clear:
+                    _f.unlink()
+                print("Fresh start: previous output deleted.")
+
+        # ── Clear checkpoints ───────────────────────────────────────────── #
         for _sno_path in [
             INITIAL_SNO_FILE,
             DISK_INPUT_DIR / "initial_profile.sno",
@@ -3295,11 +3326,7 @@ def main() -> None:
             if _cs_dir.exists():
                 for _f in _cs_dir.glob("*.sno*"):
                     _f.unlink()
-        # Remove old .pro so progress bar doesn't read stale data
-        _pro_glob = list(OUTPUT_DIR.glob("*.pro"))
-        for _pro in _pro_glob:
-            _pro.unlink()
-        print("Fresh start: checkpoints and previous output cleared.")
+        print("Fresh start: checkpoints cleared.")
 
     # ── Detect resume checkpoint before doing any expensive setup ──────── #
     _resuming = False

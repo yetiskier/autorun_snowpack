@@ -193,7 +193,8 @@ _LOG_FILTER = (
     r"|Verify that the soil|If the snow|If the soil is|Try bucket scheme)"
 )
 
-def launch_run(year: int, site: str, depth: int, run_until: str, fresh: bool = False) -> int:
+def launch_run(year: int, site: str, depth: int, run_until: str,
+               fresh: bool = False, fresh_mode: str = "archive") -> int:
     sid = site_id(year, site, depth)
     log = log_path(sid)
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -203,7 +204,7 @@ def launch_run(year: int, site: str, depth: int, run_until: str, fresh: bool = F
     if run_until.strip():
         py_args += ["--run-until", run_until.strip()]
     if fresh:
-        py_args += ["--fresh"]
+        py_args += ["--fresh", "--fresh-mode", fresh_mode]
 
     # Pipe through grep to strip SNOWPACK's verbose Richards-equation diagnostics
     py_cmd   = " ".join(shlex.quote(a) for a in py_args)
@@ -1407,10 +1408,22 @@ with tab_run:
         fresh_start = st.checkbox(
             "Fresh start (ignore checkpoint)",
             value=_default_fresh,
-            help="Clear existing checkpoint and .pro output before launching. "
+            help="Clear existing checkpoint before launching. "
                  "Always enable this when re-running a completed run.",
             disabled=running,
         )
+        if fresh_start:
+            fresh_mode = st.radio(
+                "Previous output",
+                ["Archive (keep a compressed copy)", "Delete permanently"],
+                index=0,
+                horizontal=True,
+                help="Archive creates a timestamped .tar.gz in output/archives/.",
+                disabled=running,
+            )
+            fresh_mode = "archive" if "Archive" in fresh_mode else "delete"
+        else:
+            fresh_mode = "archive"
 
         col_launch, col_kill = st.columns(2)
         with col_launch:
@@ -1420,7 +1433,8 @@ with tab_run:
             kill = st.button("⏹ Kill", disabled=not running, use_container_width=True)
 
         if launch:
-            pid = launch_run(int(year), site, int(depth), run_until, fresh=fresh_start)
+            pid = launch_run(int(year), site, int(depth), run_until,
+                             fresh=fresh_start, fresh_mode=fresh_mode)
             st.success(f"Started PID {pid}")
             time.sleep(1)
             st.rerun()
