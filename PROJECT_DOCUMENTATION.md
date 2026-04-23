@@ -454,3 +454,42 @@ Each assimilation step spawned a fresh SNOWPACK process. The dominant startup co
 
 ### App changes (`app.py`)
 - Added "Persistent daemon" checkbox to Settings tab Run section (alongside RAM disk checkbox).
+
+---
+
+## Update — 2026-04-23 (SETTEMPS — direct in-memory temperature injection)
+
+### Problem
+Even with the daemon, each assimilation step still required:
+1. Python writing the adjusted `.sno` file (~5 ms)
+2. C++ `RELOAD_SNO` parsing and re-loading the file (~50–100 ms)
+
+### Design — SETTEMPS command
+Added a new daemon stdin command: `SETTEMPS i0:T0,i1:T1,...`
+
+- Indices are 0 = bottom layer, matching `Edata[]` order.
+- Temperatures are in Kelvin (native SNOWPACK units).
+- C++ applies `Xdata.Edata[idx].Te = T_K` directly to the in-memory state.
+- Responds `READY\n` when done; Python then sends `RUN <date>`.
+- Eliminates the SNO file round-trip for temperature-only adjustments.
+
+### C++ changes (`Main.cc`)
+- Added `SETTEMPS` branch in the daemon command loop (between `RELOAD_SNO` and `RUN` handlers).
+- Parses `"SETTEMPS i:T,i:T,..."` with `std::istringstream` + `std::stoul`/`std::stod`.
+- Uses `Xdata.getNumberOfElements()` (public accessor) to bounds-check indices.
+- Responds `READY\n` then continues waiting for `RUN`.
+- Recompiled: `/home/yeti/snowmodel/snowpack-master/bin/snowpack` (Apr 23 2026, 2491296 bytes).
+
+### Python changes (`autorun_snowpack.py`)
+- `SnowpackDaemon.settemps_and_run(adjustments, new_end)`:
+  - Sends `SETTEMPS i0:T0,...\n`, waits for `READY`, sends `RUN <date>\n`, waits for CHECKPOINT.
+  - Returns `(checkpoint_str, log_text)` like `reload_and_run`.
+- `update_sno_temperatures_from_moving_profile` adds `return_adjustments: bool = False`:
+  - When `True`: skips SNO write; returns `(adjustments, needs_reload)`.
+  - `adjustments = [(layer_idx_from_bottom, T_K), ...]` for all layers.
+  - `needs_reload=True` when wet-layer draining occurred (volume fraction changes needed) — SNO is written and caller must use `RELOAD_SNO` instead of SETTEMPS.
+  - Early-return branch (< `MIN_OBS_FOR_ADJUST` obs): always writes SNO, returns `([], True)`.
+- `SETTEMPS_SNO_WRITE_INTERVAL = 24`: daemon uses SETTEMPS for up to 24 consecutive steps, then falls back to full SNO write + RELOAD_SNO for crash recovery.
+- Cycle loop tracks `_pending_adjustments` (set each step) and `_settemps_steps_since_sno_write` counter.
+- Both are reset to `None / 0` after any `daemon.respawn()` call.
+- Disk-sync (RAM disk → real disk) skipped when SETTEMPS was used (SNO not written that step).

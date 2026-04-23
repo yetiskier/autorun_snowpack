@@ -134,6 +134,9 @@ USE_RAMDISK              : bool
 USE_DAEMON               : bool
 DISK_INPUT_DIR           : Path   # real disk path used for checkpoint sync
 
+# Write a full SNO every this many daemon steps; SETTEMPS used in between.
+SETTEMPS_SNO_WRITE_INTERVAL = 24
+
 FORCING_TA_MULT   : float
 FORCING_TA_ADD    : float
 FORCING_RH_MULT   : float
@@ -2471,7 +2474,16 @@ def update_sno_temperatures_from_moving_profile(
     alpha: float,
     new_profile_date: pd.Timestamp,
     n_hours: int = 1,
-) -> None:
+    return_adjustments: bool = False,
+) -> "None | tuple[list[tuple[int, float]], bool]":
+    """Adjust layer temperatures in-place.
+
+    When return_adjustments=True: does NOT write sno_out.  Returns
+    (adjustments, needs_reload) where adjustments = [(layer_idx_from_bottom, T_K), ...]
+    and needs_reload=True means wet-layer draining or no-obs case occurred and
+    the caller must fall back to a full SNO write + RELOAD_SNO.
+    When return_adjustments=False (default): writes sno_out and returns None.
+    """
     profile = obs_profile.copy()
     profile = profile[
         np.isfinite(profile["actual_depth_m"]) &
@@ -2530,6 +2542,9 @@ def update_sno_temperatures_from_moving_profile(
         lines[_ds:_de] = _new_rows
         lines = rewrite_sno_profiledate_and_clip_timestamps(lines, new_profile_date)
         sno_out.write_text("".join(lines), encoding="utf-8")
+        if return_adjustments:
+            # No obs — fraction corrections applied; caller must RELOAD_SNO
+            return ([], True)
         return
 
     obs_depths = profile["actual_depth_m"].to_numpy(dtype=float)
@@ -2653,6 +2668,19 @@ def update_sno_temperatures_from_moving_profile(
             else:
                 vals.append(f"{float(row[field]):.10f}")
         new_rows.append(" ".join(vals) + "\n")
+
+    if return_adjustments:
+        # Return (layer_idx_from_bottom, T_K) pairs; caller sends these via SETTEMPS.
+        # When wet-layer draining occurred (needs_reload=True) we also write the SNO
+        # so the caller can fall back to RELOAD_SNO with correct volume fractions.
+        final_temps_K = df[temp_col].to_numpy(dtype=float)
+        adjustments = [(idx, float(T)) for idx, T in enumerate(final_temps_K)]
+        needs_reload = bool(newly_frozen.any())
+        if needs_reload:
+            lines[start:end] = new_rows
+            lines = rewrite_sno_profiledate_and_clip_timestamps(lines, new_profile_date)
+            sno_out.write_text("".join(lines), encoding="utf-8")
+        return (adjustments, needs_reload)
 
     lines[start:end] = new_rows
     lines = rewrite_sno_profiledate_and_clip_timestamps(lines, new_profile_date)
@@ -2823,6 +2851,38 @@ class SnowpackDaemon:
         cp = self.wait_for_checkpoint(timeout_s=timeout_s)
         return cp, "".join(self.log_lines)
 
+    def settemps_and_run(
+        self,
+        adjustments: list[tuple[int, float]],
+        new_end: pd.Timestamp,
+        timeout_s: int = 900,
+    ) -> tuple[str, str]:
+        """Send SETTEMPS (layer temps in Kelvin) + RUN, wait for CHECKPOINT.
+
+        adjustments: list of (layer_index_from_bottom, T_Kelvin) pairs.
+        Returns (checkpoint_iso_str, log_text_for_this_chunk).
+        """
+        self.log_lines.clear()
+        payload = ",".join(f"{idx}:{T_K:.6f}" for idx, T_K in adjustments)
+        self.proc.stdin.write(f"SETTEMPS {payload}\n")
+        self.proc.stdin.flush()
+        # Wait for READY acknowledgement before sending RUN
+        while True:
+            line = self.proc.stdout.readline()
+            if not line:
+                rc = self.proc.poll()
+                raise RuntimeError(
+                    f"SNOWPACK daemon exited during SETTEMPS (rc={rc})\n"
+                    + "".join(self.log_lines[-50:])
+                )
+            if line.rstrip("\n") == "READY":
+                break
+            print(line.rstrip("\n"))
+        self.proc.stdin.write(f"RUN {new_end.strftime('%Y-%m-%dT%H:%M')}\n")
+        self.proc.stdin.flush()
+        cp = self.wait_for_checkpoint(timeout_s=timeout_s)
+        return cp, "".join(self.log_lines)
+
     def respawn(
         self,
         snowpack_exe: str,
@@ -2949,6 +3009,10 @@ def cycle_hourly_snowpack_with_moving_profile(
         # First chunk runs automatically; wait for its CHECKPOINT
         daemon.wait_for_checkpoint(timeout_s=900)
 
+    # SETTEMPS state: pending adjustments for next RUN; steps since last SNO write.
+    _pending_adjustments: "list[tuple[int,float]] | None" = None
+    _settemps_steps_since_sno_write: int = 0
+
     try:
      for i in range(i_start, len(times) - 1, assimilation_interval_h):
         t0 = times[i]
@@ -2973,6 +3037,8 @@ def cycle_hourly_snowpack_with_moving_profile(
                 daemon.respawn(SNOWPACK_EXE, ini_file, PROJECT_DIR, t0, t1)
                 daemon.wait_for_checkpoint(timeout_s=900)
                 ok, msg = True, ""
+                _pending_adjustments = None
+                _settemps_steps_since_sno_write = 0
             else:
                 ok, msg = run_snowpack_one_step(
                     snowpack_exe=SNOWPACK_EXE, ini_file=ini_file,
@@ -2995,6 +3061,8 @@ def cycle_hourly_snowpack_with_moving_profile(
                     daemon.respawn(SNOWPACK_EXE, ini_file, PROJECT_DIR, t0, t1)
                     daemon.wait_for_checkpoint(timeout_s=900)
                     ok, msg = True, ""
+                    _pending_adjustments = None
+                    _settemps_steps_since_sno_write = 0
                 else:
                     ok, msg = run_snowpack_one_step(
                         snowpack_exe=SNOWPACK_EXE, ini_file=ini_file,
@@ -3002,7 +3070,10 @@ def cycle_hourly_snowpack_with_moving_profile(
                     )
             else:
                 if daemon and i > i_start:
-                    cp, msg = daemon.reload_and_run(t1, timeout_s=900)
+                    if _pending_adjustments is not None:
+                        cp, msg = daemon.settemps_and_run(_pending_adjustments, t1, timeout_s=900)
+                    else:
+                        cp, msg = daemon.reload_and_run(t1, timeout_s=900)
                     ok = True
                 elif daemon and i == i_start:
                     ok, msg = True, "".join(daemon.log_lines)
@@ -3015,7 +3086,10 @@ def cycle_hourly_snowpack_with_moving_profile(
         # ── Normal step ───────────────────────────────────────────────── #
         else:
             if daemon and i > i_start:
-                cp, msg = daemon.reload_and_run(t1, timeout_s=900)
+                if _pending_adjustments is not None:
+                    cp, msg = daemon.settemps_and_run(_pending_adjustments, t1, timeout_s=900)
+                else:
+                    cp, msg = daemon.reload_and_run(t1, timeout_s=900)
                 ok = True
             elif daemon and i == i_start:
                 # First chunk already ran at daemon spawn
@@ -3050,6 +3124,8 @@ def cycle_hourly_snowpack_with_moving_profile(
                     daemon.respawn(SNOWPACK_EXE, ini_file, PROJECT_DIR, t0, t1)
                     daemon.wait_for_checkpoint(timeout_s=900)
                     ok, msg = True, ""
+                    _pending_adjustments = None
+                    _settemps_steps_since_sno_write = 0
                 else:
                     ok, msg = run_snowpack_one_step(
                         snowpack_exe=SNOWPACK_EXE,
@@ -3081,6 +3157,15 @@ def cycle_hourly_snowpack_with_moving_profile(
 
         obs_profile = get_profile_observations_for_time(long_df, t1)
 
+        # Use SETTEMPS fast path when daemon is active and not due for a periodic
+        # SNO write (SETTEMPS_SNO_WRITE_INTERVAL).  Falls back to full SNO write
+        # whenever wet-layer draining occurs or we're in KEEP_HOURLY_ARCHIVES mode.
+        _use_settemps = (
+            daemon is not None
+            and not KEEP_HOURLY_ARCHIVES
+            and _settemps_steps_since_sno_write < SETTEMPS_SNO_WRITE_INTERVAL
+        )
+
         if KEEP_HOURLY_ARCHIVES:
             raw_archive = CURRENT_SNOW_DIR / f"raw_{t1:%Y%m%dT%H%M%S}.sno"
             adjusted_archive = CURRENT_SNOW_DIR / f"adj_{t1:%Y%m%dT%H%M%S}.sno"
@@ -3096,7 +3181,29 @@ def cycle_hourly_snowpack_with_moving_profile(
             )
 
             shutil.copy2(adjusted_archive, input_sno_file)
+            _pending_adjustments = None
+            _settemps_steps_since_sno_write = 0
             print(f"{t1}: wrote raw={raw_archive.name}, adjusted={adjusted_archive.name}")
+        elif _use_settemps:
+            adj_result = update_sno_temperatures_from_moving_profile(
+                sno_in=latest_sno,
+                sno_out=input_sno_file,
+                obs_profile=obs_profile,
+                alpha=alpha,
+                new_profile_date=t1,
+                n_hours=n_hours,
+                return_adjustments=True,
+            )
+            adjustments, needs_reload = adj_result
+            if needs_reload:
+                # Wet drain or no-obs: SNO was written; daemon must RELOAD_SNO next step
+                _pending_adjustments = None
+                _settemps_steps_since_sno_write = 0
+                print(f"{t1}: adjustments (wet-drain/no-obs) — SNO written, will RELOAD_SNO")
+            else:
+                _pending_adjustments = adjustments
+                _settemps_steps_since_sno_write += 1
+                print(f"{t1}: {len(adjustments)} layer temps → SETTEMPS")
         else:
             tmp_adjusted = CURRENT_SNOW_DIR / "_adjusted_tmp.sno"
 
@@ -3119,7 +3226,8 @@ def cycle_hourly_snowpack_with_moving_profile(
             prune_sno_files(CURRENT_SNOW_DIR, keep_last_n=KEEP_LAST_N_SNO)
             prune_haz_files(OUTPUT_DIR, keep_last_n=0)
             prune_haz_files(CURRENT_SNOW_DIR, keep_last_n=0)
-
+            _pending_adjustments = None
+            _settemps_steps_since_sno_write = 0
             print(f"{t1}: updated {input_sno_file.name}")
 
         latest_sno_backup = CURRENT_SNOW_DIR / "_latest_unadjusted_backup.sno"
@@ -3132,8 +3240,10 @@ def cycle_hourly_snowpack_with_moving_profile(
         if not same_file:
             shutil.copy2(latest_sno, latest_sno_backup)
 
-        # Sync checkpoint SNO back to disk so a crash doesn't lose progress
-        if USE_RAMDISK and input_sno_file != DISK_INPUT_DIR / input_sno_file.name:
+        # Sync checkpoint SNO back to disk so a crash doesn't lose progress.
+        # Skip when SETTEMPS was used (SNO not written this step).
+        if (USE_RAMDISK and input_sno_file != DISK_INPUT_DIR / input_sno_file.name
+                and _pending_adjustments is None):
             shutil.copy2(input_sno_file, DISK_INPUT_DIR / input_sno_file.name)
 
     finally:
