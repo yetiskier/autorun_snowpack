@@ -572,3 +572,26 @@ Correlation of ΔLWC (dynamic − fixed) with density over 365,619 valid pixels:
 - 750–917 kg/m³: +0.07 to +0.11 (44–46% blue)
 
 **Working hypothesis:** Higher θᵣ in low-density firn reclassifies water as immobile residual, altering percolation routing — water that pooled in low-density layers in the fixed run is redistributed or drains faster in the dynamic run. Mechanism not fully resolved.
+
+### θᵣ range in the dynamic RE run (2019_T2minus_32m)
+
+Computed from ice volume fraction (field 515) using the full Coléou formula in `DataClasses.cc`:
+
+- **Overall range: 0.000 – 0.080** (0.08 cap never reached; zero occurs where pore-space cap dominates for θᵢ > 0.971)
+- **Median: 0.029, mean: 0.029**
+- **92.5% of all layer-timesteps have θᵣ > 0.02** — the old fixed cap was binding for nearly the entire column almost all the time
+- **7.5% of layers** are dense enough (θᵢ > 0.971) that the pore-space cap drives θᵣ below 0.02 toward zero
+
+By density bin:
+
+| Density (kg/m³) | θᵣ range | Mean θᵣ |
+|---|---|---|
+| 0–211 (low-density snow) | 0.061–0.080 | 0.067 |
+| 211–367 | 0.042–0.060 | 0.047 |
+| 367–504 | 0.035–0.041 | 0.037 |
+| 504–642 | 0.031–0.035 | 0.032 |
+| 642–779 | 0.028–0.031 | 0.029 |
+| 779–871 | 0.027–0.028 | 0.028 |
+| 871–917 (near-ice) | 0.000–0.027 | 0.017 |
+
+Typical firn (most of the column) runs at ~1.5× the old fixed value.
