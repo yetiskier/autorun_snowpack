@@ -23,6 +23,8 @@ water_transport = "BUCKET"
 assimilation_interval_h = 1
 # Run working files (SNO, cfgfiles, current_snow) from /dev/shm RAM disk for faster I/O
 use_ramdisk = true
+# Keep SNOWPACK alive between assimilation steps (avoids re-reading SMET on each step)
+use_daemon = true
 
 [model]
 calculation_step_length_min = 15.0

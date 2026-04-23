@@ -131,6 +131,7 @@ WET_LAYER_DRAIN_THRESHOLD_C : float
 WATER_TRANSPORT          : str
 ASSIMILATION_INTERVAL_H  : int
 USE_RAMDISK              : bool
+USE_DAEMON               : bool
 DISK_INPUT_DIR           : Path   # real disk path used for checkpoint sync
 
 FORCING_TA_MULT   : float
@@ -251,7 +252,7 @@ def configure(args: argparse.Namespace, cfg: dict) -> None:
     global ADD_BASAL_LAYERS, BASAL_LAYER_THICKNESSES_M, BASAL_TREND_LOOKBACK_M, BASAL_TEMP_MIN_C
     global TEMP_MIN_C, TEMP_MAX_C, MAX_ADJUST_PER_HOUR_C, MIN_OBS_FOR_ADJUST, ASSIMILATION_INTERVAL_H
     global WET_LAYER_DRAIN_THRESHOLD_C
-    global WATER_TRANSPORT, USE_RAMDISK, DISK_INPUT_DIR
+    global WATER_TRANSPORT, USE_RAMDISK, USE_DAEMON, DISK_INPUT_DIR
     global FORCING_TA_MULT, FORCING_TA_ADD, FORCING_RH_MULT, FORCING_RH_ADD
     global FORCING_VW_MULT, FORCING_VW_ADD, FORCING_ISWR_MULT, FORCING_ISWR_ADD
     global FORCING_ILWR_MULT, FORCING_ILWR_ADD, FORCING_PSUM_MULT, FORCING_PSUM_ADD
@@ -363,6 +364,7 @@ def configure(args: argparse.Namespace, cfg: dict) -> None:
     WATER_TRANSPORT         = str(cfg["run"].get("water_transport", "adaptive"))
     ASSIMILATION_INTERVAL_H = int(cfg["run"].get("assimilation_interval_h", 1))
     USE_RAMDISK             = bool(cfg["run"].get("use_ramdisk", False))
+    USE_DAEMON              = bool(cfg["run"].get("use_daemon", False))
 
     DISK_INPUT_DIR = INPUT_DIR  # save real disk path before any ramdisk redirect
 
@@ -2748,6 +2750,104 @@ def run_snowpack_one_step(
             pass
 
 
+class SnowpackDaemon:
+    """Persistent SNOWPACK process communicating via stdin/stdout pipes.
+
+    The daemon binary accepts --daemon mode: it loads the SNO + SMET once,
+    runs a chunk, writes the SNO checkpoint, signals CHECKPOINT <date> on
+    stdout, then waits for RELOAD_SNO / RUN / QUIT commands on stdin.
+    """
+
+    def __init__(
+        self,
+        snowpack_exe: str,
+        ini_file: Path,
+        work_dir: Path,
+        start_time: pd.Timestamp,
+        end_time: pd.Timestamp,
+    ) -> None:
+        import threading
+        ini_rel = ini_file.relative_to(work_dir)
+        cmd = [
+            snowpack_exe, "--daemon",
+            "-c", str(ini_rel),
+            "-b", start_time.strftime("%Y-%m-%dT%H:%M"),
+            "-e", end_time.strftime("%Y-%m-%dT%H:%M"),
+        ]
+        print("Spawning SNOWPACK daemon:", " ".join(cmd))
+        self.proc = subprocess.Popen(
+            cmd, cwd=str(work_dir),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+        self.log_lines: list[str] = []
+        t = threading.Thread(target=self._drain_stderr, daemon=True)
+        t.start()
+
+    def _drain_stderr(self) -> None:
+        for line in self.proc.stderr:
+            print(line, end="", flush=True)
+            self.log_lines.append(line)
+
+    def wait_for_checkpoint(self, timeout_s: int = 900) -> str:
+        """Read stdout until CHECKPOINT; print other lines. Returns ISO date string."""
+        import time
+        t0 = time.time()
+        while True:
+            if time.time() - t0 > timeout_s:
+                self.proc.kill()
+                raise RuntimeError(f"SNOWPACK daemon timed out after {timeout_s} s")
+            line = self.proc.stdout.readline()
+            if not line:
+                rc = self.proc.poll()
+                raise RuntimeError(
+                    f"SNOWPACK daemon exited unexpectedly (rc={rc})\n"
+                    + "".join(self.log_lines[-50:])
+                )
+            stripped = line.rstrip("\n")
+            if stripped.startswith("CHECKPOINT "):
+                ts = stripped.split(None, 1)[1]
+                print(f"[daemon] CHECKPOINT {ts}")
+                return ts
+            print(stripped)
+
+    def reload_and_run(self, new_end: pd.Timestamp, timeout_s: int = 900) -> tuple[str, str]:
+        """Send RELOAD_SNO + RUN, wait for CHECKPOINT.
+
+        Returns (checkpoint_iso_str, log_text_for_this_chunk).
+        """
+        self.log_lines.clear()
+        self.proc.stdin.write("RELOAD_SNO\n")
+        self.proc.stdin.write(f"RUN {new_end.strftime('%Y-%m-%dT%H:%M')}\n")
+        self.proc.stdin.flush()
+        cp = self.wait_for_checkpoint(timeout_s=timeout_s)
+        return cp, "".join(self.log_lines)
+
+    def respawn(
+        self,
+        snowpack_exe: str,
+        ini_file: Path,
+        work_dir: Path,
+        start_time: pd.Timestamp,
+        end_time: pd.Timestamp,
+    ) -> None:
+        """Quit current daemon and start a fresh one (e.g. after water-transport switch)."""
+        self.quit()
+        self.__init__(snowpack_exe, ini_file, work_dir, start_time, end_time)
+
+    def quit(self) -> None:
+        if self.proc is None or self.proc.poll() is not None:
+            return
+        try:
+            self.proc.stdin.write("QUIT\n")
+            self.proc.stdin.flush()
+            self.proc.stdin.close()
+            self.proc.wait(timeout=30)
+        except Exception:
+            self.proc.kill()
+            self.proc.wait()
+
+
 def cycle_hourly_snowpack_with_moving_profile(
     temp_hourly: pd.DataFrame,
     long_df: pd.DataFrame,
@@ -2757,6 +2857,7 @@ def cycle_hourly_snowpack_with_moving_profile(
     stabilization_days: int = 15,
     water_transport: str = "adaptive",
     assimilation_interval_h: int = 1,
+    use_daemon: bool = False,
 ) -> None:
     """Run SNOWPACK hour-by-hour with temperature assimilation.
 
@@ -2834,7 +2935,22 @@ def cycle_hourly_snowpack_with_moving_profile(
         )
         print(f"Resume: INI set to {resume_scheme}")
 
-    for i in range(i_start, len(times) - 1, assimilation_interval_h):
+    # ── Spawn persistent daemon (if requested and steps remain) ───────── #
+    daemon: SnowpackDaemon | None = None
+    if use_daemon and i_start < len(times) - 1:
+        i_first_end = min(i_start + assimilation_interval_h, len(times) - 1)
+        daemon = SnowpackDaemon(
+            snowpack_exe=SNOWPACK_EXE,
+            ini_file=ini_file,
+            work_dir=PROJECT_DIR,
+            start_time=times[i_start],
+            end_time=times[i_first_end],
+        )
+        # First chunk runs automatically; wait for its CHECKPOINT
+        daemon.wait_for_checkpoint(timeout_s=900)
+
+    try:
+     for i in range(i_start, len(times) - 1, assimilation_interval_h):
         t0 = times[i]
         i_end = min(i + assimilation_interval_h, len(times) - 1)
         t1 = times[i_end]
@@ -2851,9 +2967,20 @@ def cycle_hourly_snowpack_with_moving_profile(
             )
             switched = True
             using_re = True
+            if daemon:
+                # Daemon has old INI — respawn with new RICHARDSEQUATION INI
+                print(f"[daemon] respawning with RICHARDSEQUATION")
+                daemon.respawn(SNOWPACK_EXE, ini_file, PROJECT_DIR, t0, t1)
+                daemon.wait_for_checkpoint(timeout_s=900)
+                ok, msg = True, ""
+            else:
+                ok, msg = run_snowpack_one_step(
+                    snowpack_exe=SNOWPACK_EXE, ini_file=ini_file,
+                    start_time=t0, end_time=t1, work_dir=PROJECT_DIR,
+                )
 
         # ── BUCKET fallback countdown → restore RE when done ──────────── #
-        if bucket_fallback_remaining > 0:
+        elif bucket_fallback_remaining > 0:
             bucket_fallback_remaining = max(0, bucket_fallback_remaining - n_hours)
             if bucket_fallback_remaining == 0:
                 print(f"{t0}: RE fallback period over — switching back to RICHARDSEQUATION")
@@ -2864,14 +2991,43 @@ def cycle_hourly_snowpack_with_moving_profile(
                     water_transport="RICHARDSEQUATION",
                 )
                 using_re = True
+                if daemon:
+                    daemon.respawn(SNOWPACK_EXE, ini_file, PROJECT_DIR, t0, t1)
+                    daemon.wait_for_checkpoint(timeout_s=900)
+                    ok, msg = True, ""
+                else:
+                    ok, msg = run_snowpack_one_step(
+                        snowpack_exe=SNOWPACK_EXE, ini_file=ini_file,
+                        start_time=t0, end_time=t1, work_dir=PROJECT_DIR,
+                    )
+            else:
+                if daemon and i > i_start:
+                    cp, msg = daemon.reload_and_run(t1, timeout_s=900)
+                    ok = True
+                elif daemon and i == i_start:
+                    ok, msg = True, "".join(daemon.log_lines)
+                else:
+                    ok, msg = run_snowpack_one_step(
+                        snowpack_exe=SNOWPACK_EXE, ini_file=ini_file,
+                        start_time=t0, end_time=t1, work_dir=PROJECT_DIR,
+                    )
 
-        ok, msg = run_snowpack_one_step(
-            snowpack_exe=SNOWPACK_EXE,
-            ini_file=ini_file,
-            start_time=t0,
-            end_time=t1,
-            work_dir=PROJECT_DIR,
-        )
+        # ── Normal step ───────────────────────────────────────────────── #
+        else:
+            if daemon and i > i_start:
+                cp, msg = daemon.reload_and_run(t1, timeout_s=900)
+                ok = True
+            elif daemon and i == i_start:
+                # First chunk already ran at daemon spawn
+                ok, msg = True, "".join(daemon.log_lines)
+            else:
+                ok, msg = run_snowpack_one_step(
+                    snowpack_exe=SNOWPACK_EXE,
+                    ini_file=ini_file,
+                    start_time=t0,
+                    end_time=t1,
+                    work_dir=PROJECT_DIR,
+                )
 
         # ── RE convergence failure → fall back to BUCKET (adaptive only) ─ #
         # Must be checked BEFORE the ok-guard so a RE timeout triggers a
@@ -2890,13 +3046,18 @@ def cycle_hourly_snowpack_with_moving_profile(
                 # RE timed out — retry this step with BUCKET
                 print(f"{t0}→{t1}: RE timed out with convergence failures; "
                       f"retrying with BUCKET (fallback for 24 h)")
-                ok, msg = run_snowpack_one_step(
-                    snowpack_exe=SNOWPACK_EXE,
-                    ini_file=ini_file,
-                    start_time=t0,
-                    end_time=t1,
-                    work_dir=PROJECT_DIR,
-                )
+                if daemon:
+                    daemon.respawn(SNOWPACK_EXE, ini_file, PROJECT_DIR, t0, t1)
+                    daemon.wait_for_checkpoint(timeout_s=900)
+                    ok, msg = True, ""
+                else:
+                    ok, msg = run_snowpack_one_step(
+                        snowpack_exe=SNOWPACK_EXE,
+                        ini_file=ini_file,
+                        start_time=t0,
+                        end_time=t1,
+                        work_dir=PROJECT_DIR,
+                    )
             else:
                 print(f"{t1}: RE SafeMode convergence failure; "
                       f"switching to BUCKET for next 24 model hours")
@@ -2974,6 +3135,10 @@ def cycle_hourly_snowpack_with_moving_profile(
         # Sync checkpoint SNO back to disk so a crash doesn't lose progress
         if USE_RAMDISK and input_sno_file != DISK_INPUT_DIR / input_sno_file.name:
             shutil.copy2(input_sno_file, DISK_INPUT_DIR / input_sno_file.name)
+
+    finally:
+        if daemon is not None:
+            daemon.quit()
 
 
 # =============================================================================
@@ -3105,6 +3270,7 @@ def main() -> None:
         stabilization_days=15,
         water_transport=args.water_transport if args.water_transport is not None else WATER_TRANSPORT,
         assimilation_interval_h=ASSIMILATION_INTERVAL_H,
+        use_daemon=USE_DAEMON,
     )
 
     # Generate static PNG figures via visualize_pro.py

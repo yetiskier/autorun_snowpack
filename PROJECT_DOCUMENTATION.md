@@ -398,3 +398,59 @@ See §6.5. Uses simultaneous increase in ice volume fraction and decrease in LWC
 
 ### max_adjust_per_hour_c
 - Increased from 0.1°C to 1.0°C in settings (user changed via app).
+
+---
+
+## Update — 2026-04-22 (Performance: assimilation interval, RAM disk, run status UI)
+
+### assimilation_interval_h
+- Added `assimilation_interval_h` to `settings.toml [run]` (default 1). Controls how many hours SNOWPACK runs per cycle. The assimilation temperature cap scales proportionally: `max_delta = MAX_ADJUST_PER_HOUR_C * n_hours`.
+- `cycle_hourly_snowpack_with_moving_profile` now accepts `assimilation_interval_h` and steps the loop in chunks of that many hours.
+- Exposed in app Settings tab.
+
+### RAM disk (`use_ramdisk`)
+- Added `use_ramdisk = true` to `settings.toml [run]`.
+- `_setup_ramdisk(site_id, disk_project_dir)` creates `/dev/shm/snowpack_{site_id}/`, copies hot files (SNO, cfgfiles, current_snow) there, symlinks output/era_tmp/cache to disk.
+- `configure()` redirects PROJECT_DIR / INPUT_DIR / CFG_DIR / CURRENT_SNOW_DIR to RAM paths when enabled. `DISK_INPUT_DIR` retains the real disk path for checkpoint syncs.
+- After each assimilation step, modified SNO is synced back to disk.
+
+### Run tab — core status UI
+- `_core_status(y, s, d)` classifies each core as `fresh / complete / incomplete / running`.
+- Four radio buttons always shown with counts: "Not yet run (N)", "Completed (N)", "Incomplete / crashed (N)", "In progress (N)".
+- `get_pro_current_time` reads last 2 MB of .pro file (previously 3 KB, too small for ~125 KB/timestep blocks).
+- `_temp_date_range` fixed to skip non-date rows (previously skipped first 4 rows but CSVs have 5 header rows, causing `pd.to_datetime("timestamp")` error → all cores falsely "fresh").
+- `get_expected_date_range`: removed `@st.cache_data` to prevent stale (None, None) poisoning.
+- `is_running`: added `/proc/*/cwd` fallback to detect runs launched from terminal (no PID file).
+
+### SNOWPACK timeout
+- Raised from 300 s to 900 s in `run_snowpack_one_step` (2022 T3 summer melt steps took up to 141 s).
+
+### Settings tab reorganisation
+- Settings tab uses 5 `st.expander` accordion sections: Paths, Run, Model & assimilation, Basal boundary, ERA5 forcing adjustments.
+
+---
+
+## Update — 2026-04-23 (Persistent SNOWPACK daemon)
+
+### Problem
+Each assimilation step spawned a fresh SNOWPACK process. The dominant startup cost was MeteoIO re-reading and pre-buffering the SMET forcing file on every respawn — O(record_length) per hour of simulation.
+
+### Design
+- Modified `SNOWPACK/applications/snowpack/Main.cc` to support `--daemon` mode.
+- In daemon mode, SNOWPACK initialises once (reads SNO, pre-buffers SMET), then enters a command loop on stdin:
+  - `RUN YYYY-MM-DDTHH:MM` — advance simulation to that date, write SNO checkpoint, print `CHECKPOINT <date>` to stdout, wait for next command.
+  - `RELOAD_SNO` — re-read the (Python-modified) `.sno` file into memory; IOManager buffer stays warm.
+  - `QUIT` — write final SNO and exit.
+- The Hazard object and qr_Hdata arrays are reinitialised per chunk (duration changes). vecXdata, IOManager, SunObject persist across chunks.
+- Recompiled: `/home/yeti/snowmodel/snowpack-master/bin/snowpack` (version 3.7.0, Apr 23 2026).
+
+### Python changes (`autorun_snowpack.py`)
+- `SnowpackDaemon` class manages the subprocess (spawn, wait_for_checkpoint, reload_and_run, respawn, quit).
+- Daemon stdout is the pipe channel (CHECKPOINT lines); stderr is drained by a background thread and printed to console.
+- `cycle_hourly_snowpack_with_moving_profile` accepts `use_daemon=False`. When True, spawns the daemon for the first chunk (which runs automatically on spawn), then uses `reload_and_run` for subsequent steps.
+- Water-transport scheme switches (adaptive mode stabilisation switch, RE→BUCKET fallback) handled by `daemon.respawn()` — re-spawns with new INI, costs one cold start but only happens once per run.
+- `USE_DAEMON` global loaded from `settings.toml [run]`; passed to `cycle_hourly_snowpack_with_moving_profile` from `main()`.
+- Enabled by default: `use_daemon = true` in `settings.toml`.
+
+### App changes (`app.py`)
+- Added "Persistent daemon" checkbox to Settings tab Run section (alongside RAM disk checkbox).

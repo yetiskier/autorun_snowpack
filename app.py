@@ -1477,7 +1477,11 @@ with tab_settings:
                     "RAM disk (/dev/shm)",
                     value=bool(doc["run"].get("use_ramdisk", False)),
                     help="Run .sno and config files from RAM for faster I/O. Output .pro stays on disk.")
-                doc["run"]["keep_hourly_archives"] = c3.checkbox(
+                doc["run"]["use_daemon"] = c3.checkbox(
+                    "Persistent daemon",
+                    value=bool(doc["run"].get("use_daemon", False)),
+                    help="Keep SNOWPACK alive between assimilation steps to avoid reloading the SMET forcing file each hour.")
+                doc["run"]["keep_hourly_archives"] = c4.checkbox(
                     "Keep hourly .sno archives",
                     value=bool(doc["run"]["keep_hourly_archives"]))
 
