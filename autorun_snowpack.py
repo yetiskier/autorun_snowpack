@@ -78,6 +78,7 @@ DEFAULT_WATER_FRAC_AT_ZERO : float
 ZERO_TEMP_TOL           : float
 ICE_DENSITY             : float
 WATER_DENSITY           : float
+MAX_VOL_FRAC_ICE        : float
 
 CALCULATION_STEP_LENGTH_MIN : float
 HEIGHT_OF_METEO_VALUES      : float
@@ -252,7 +253,7 @@ def configure(args: argparse.Namespace, cfg: dict) -> None:
     global INPUT_DIR, CFG_DIR, OUTPUT_DIR, CURRENT_SNOW_DIR, ERA_TMP_DIR, CACHE_DIR
     global INITIAL_SNO_FILE, FORCING_SMET_FILE, CFG_INI_FILE
     global SNOWPACK_EXE, DEFAULT_ELEVATION_M, DEFAULT_WATER_FRAC_AT_ZERO
-    global ZERO_TEMP_TOL, ICE_DENSITY, WATER_DENSITY
+    global ZERO_TEMP_TOL, ICE_DENSITY, WATER_DENSITY, MAX_VOL_FRAC_ICE
     global CALCULATION_STEP_LENGTH_MIN, HEIGHT_OF_METEO_VALUES, HEIGHT_OF_WIND_VALUE, ALPHA
     global ERA5_DATASET, ERA5LAND_DATASET
     global SLOPE_ANGLE, SLOPE_AZI, SOIL_ALBEDO, BARE_SOIL_Z0
@@ -313,6 +314,8 @@ def configure(args: argparse.Namespace, cfg: dict) -> None:
     ZERO_TEMP_TOL              = float(ph["zero_temp_tol"])
     ICE_DENSITY                = float(ph["ice_density"])
     WATER_DENSITY              = float(ph["water_density"])
+    _mvfi = float(ph.get("max_vol_frac_ice", 0.98))
+    MAX_VOL_FRAC_ICE = max(0.90, min(0.99, _mvfi))
 
     sd = cfg["snow_defaults"]
     DEFAULT_CONDUC_S    = float(sd["conduc_s"])
@@ -1318,7 +1321,7 @@ def write_sno_file(
         f.write("[DATA]\n")
 
         for _, r in sno_df.iterrows():
-            vi = round(float(r['Vol_Frac_I']), 10)
+            vi = min(round(float(r['Vol_Frac_I']), 10), MAX_VOL_FRAC_ICE)
             vw = round(float(r['Vol_Frac_W']), 10)
             vs = round(float(r['Vol_Frac_S']), 10)
             vv = round(1.0 - vi - vw - vs, 10)
@@ -2375,12 +2378,42 @@ def rewrite_sno_profiledate_and_clip_timestamps(
         ts = ts.where(ts <= new_profile_date, new_profile_date)
         df["timestamp"] = ts.dt.strftime("%Y-%m-%dT%H:%M:%S")
 
-    # Apply residual volume-fraction fix so sums are exactly 1.0 even when
-    # the source file used lower precision (e.g. SNOWPACK's 6-dp restart files).
+    # Fix volume-fraction sums (SNOWPACK restart files use 6-dp precision which
+    # can leave sums at 0.999999) and enforce the ice-fraction cap.
+    # For the cap: ice mass and sensible heat are conserved by scaling Layer_Thick
+    # proportionally — ρ_i × θ_i × thick is invariant, and so is θ_i × c_i × T × thick.
+    # The "created" air pore (Δθ_v = Δθ_i / original_θ_i × θ_i_new) is physically real:
+    # SNOWPACK's compaction model drove θ_i to 1.0 as a numerical artefact; the cap
+    # restores the small residual porosity that RE needs for a finite K(θ).
     frac_i_col = next((f for f in fields if f == "Vol_Frac_I"), None)
     frac_w_col = next((f for f in fields if f == "Vol_Frac_W"), None)
     frac_v_col = next((f for f in fields if f == "Vol_Frac_V"), None)
     frac_s_col = next((f for f in fields if f == "Vol_Frac_S"), None)
+    thick_col  = next((f for f in fields if f == "Layer_Thick"), None)
+
+    hs_changed = False
+    if frac_i_col and thick_col:
+        for idx in df.index:
+            vi_raw = float(df.at[idx, frac_i_col])
+            if vi_raw > MAX_VOL_FRAC_ICE:
+                scale = vi_raw / MAX_VOL_FRAC_ICE
+                df.at[idx, frac_i_col] = MAX_VOL_FRAC_ICE
+                df.at[idx, thick_col]  = float(df.at[idx, thick_col]) * scale
+                hs_changed = True
+    elif frac_i_col:
+        # No thickness column — cap without mass conservation (fallback only)
+        for idx in df.index:
+            vi_raw = float(df.at[idx, frac_i_col])
+            if vi_raw > MAX_VOL_FRAC_ICE:
+                df.at[idx, frac_i_col] = MAX_VOL_FRAC_ICE
+
+    if hs_changed:
+        new_hs_last = df[thick_col].astype(float).sum()
+        for i, line in enumerate(out[:start]):
+            if line.strip().startswith("HS_Last"):
+                left, _ = line.split("=", 1)
+                out[i] = f"{left}= {new_hs_last:.6f}\n"
+                break
 
     new_rows = []
     for _, row in df.iterrows():

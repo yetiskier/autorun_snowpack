@@ -1557,7 +1557,7 @@ with tab_settings:
                     value=bool(doc["run"]["keep_hourly_archives"]))
 
             with st.expander("Model & assimilation", expanded=False):
-                c1, c2, c3 = st.columns(3)
+                c1, c2, c3, c4 = st.columns(4)
                 doc["model"]["calculation_step_length_min"] = c1.number_input(
                     "Step length (min)", value=float(doc["model"]["calculation_step_length_min"]),
                     step=1.0)
@@ -1567,6 +1567,15 @@ with tab_settings:
                 doc["model"]["default_elevation_m"] = c3.number_input(
                     "Default elevation (m)", value=float(doc["model"]["default_elevation_m"]),
                     step=10.0)
+                if "physics" not in doc:
+                    doc.add("physics", tomlkit.table())
+                doc["physics"]["max_vol_frac_ice"] = c4.number_input(
+                    "Max ice vol. fraction",
+                    value=float(doc["physics"].get("max_vol_frac_ice", 0.98)),
+                    min_value=0.90, max_value=0.99, step=0.01, format="%.2f",
+                    help="Cap on θ_i written to .sno files (0.90–0.99). Keeps a residual "
+                         "air pore in ice lenses so the Richards Equation solver stays "
+                         "well-posed. Default 0.98 ≈ 898 kg/m³ effective density.")
                 c1, c2, c3, c4 = st.columns(4)
                 doc["assimilation"]["temp_min_c"] = c1.number_input(
                     "T min (°C)", value=float(doc["assimilation"]["temp_min_c"]), step=1.0)

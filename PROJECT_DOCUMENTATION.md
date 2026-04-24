@@ -602,3 +602,21 @@ By density bin:
 | 871–917 (near-ice) | 0.000–0.027 | 0.017 |
 
 Typical firn (most of the column) runs at ~1.5× the old fixed value.
+
+## Update — 2026-04-24
+
+### Ice-lens RE convergence fix: `max_vol_frac_ice` setting
+
+**Problem diagnosed:** The 2022_T3_25m run crashed (900 s daemon timeout) on the resume at 2022-06-09 07:00. The restart SNO contained 9 layers with θ_i = 1.0000 (porosity = 0), which makes the Richards Equation van Genuchten retention curve and hydraulic conductivity K(θ) degenerate. The RE Newton solver emitted ~18,000 "set surfacefluxrate from 0 to 0" warnings without advancing a single time step.
+
+**Fix:** Added `max_vol_frac_ice` setting (default 0.98, range 0.90–0.99) applied at every SNO write. For SNOWPACK restart files (all paths through `rewrite_sno_profiledate_and_clip_timestamps`), the fix is **mass- and enthalpy-conserving**: when θ_i > MAX_VOL_FRAC_ICE, `Layer_Thick` is scaled by the factor θ_i_old / MAX_VOL_FRAC_ICE so that the ice mass per unit area (ρ_i × θ_i × thick) and sensible heat per unit area (ρ_i × c_i × T × θ_i × thick) are both unchanged. `HS_Last` in the SNO header is updated to reflect the new total column height (~1.2 cm gain for the T3 crash profile). The air pore (θ_v) absorbs the density reduction. For the initial profile build from observed density (`write_sno_file`), a simple cap is applied without thickness adjustment — measurement precision at ρ = 917 kg/m³ is insufficient to distinguish 898 from 917.
+
+**Files changed:**
+- `settings.toml` — new `[physics] max_vol_frac_ice = 0.98`
+- `autorun_snowpack.py` — global `MAX_VOL_FRAC_ICE`, loaded and clamped in `_load_settings`; conservation logic in `rewrite_sno_profiledate_and_clip_timestamps`; simple cap in `write_sno_file`
+- `app.py` — "Max ice vol. fraction" number_input (0.90–0.99) in "Model & assimilation" expander
+
+**Conservation properties:**
+- Mass: ρ_i × θ_i × thick = const ✓ (restart paths); small error on initialization (measurement noise)
+- Sensible heat: ρ_i × c_i × T × θ_i × thick = const ✓ (restart paths)
+- Latent heat budget: conserved since ice mass is conserved ✓

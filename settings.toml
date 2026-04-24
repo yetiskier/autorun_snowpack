@@ -44,6 +44,11 @@ default_water_frac_at_zero = 0.08
 zero_temp_tol  = 1.0e-9
 ice_density    = 917.0
 water_density  = 1000.0
+# Maximum volumetric ice fraction written to .sno layers (valid range 0.90–0.99).
+# Capping below 1.0 keeps a residual air pore in ice lenses so the Richards
+# Equation solver has finite hydraulic conductivity everywhere. Default 0.98
+# gives an effective ice-layer density of ≈ 898 kg/m³.
+max_vol_frac_ice = 0.98
 
 [snow_defaults]
 # Initial microstructure values written to .sno layers.
