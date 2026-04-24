@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import json
 import re
 import shutil
 import subprocess
 import sys
 import tomllib
 import zipfile
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,6 +81,7 @@ ZERO_TEMP_TOL           : float
 ICE_DENSITY             : float
 WATER_DENSITY           : float
 MAX_VOL_FRAC_ICE        : float
+PRO_CHUNK_HOURS         : int
 
 CALCULATION_STEP_LENGTH_MIN : float
 HEIGHT_OF_METEO_VALUES      : float
@@ -253,7 +256,7 @@ def configure(args: argparse.Namespace, cfg: dict) -> None:
     global INPUT_DIR, CFG_DIR, OUTPUT_DIR, CURRENT_SNOW_DIR, ERA_TMP_DIR, CACHE_DIR
     global INITIAL_SNO_FILE, FORCING_SMET_FILE, CFG_INI_FILE
     global SNOWPACK_EXE, DEFAULT_ELEVATION_M, DEFAULT_WATER_FRAC_AT_ZERO
-    global ZERO_TEMP_TOL, ICE_DENSITY, WATER_DENSITY, MAX_VOL_FRAC_ICE
+    global ZERO_TEMP_TOL, ICE_DENSITY, WATER_DENSITY, MAX_VOL_FRAC_ICE, PRO_CHUNK_HOURS
     global CALCULATION_STEP_LENGTH_MIN, HEIGHT_OF_METEO_VALUES, HEIGHT_OF_WIND_VALUE, ALPHA
     global ERA5_DATASET, ERA5LAND_DATASET
     global SLOPE_ANGLE, SLOPE_AZI, SOIL_ALBEDO, BARE_SOIL_Z0
@@ -316,6 +319,9 @@ def configure(args: argparse.Namespace, cfg: dict) -> None:
     WATER_DENSITY              = float(ph["water_density"])
     _mvfi = float(ph.get("max_vol_frac_ice", 0.98))
     MAX_VOL_FRAC_ICE = max(0.90, min(0.99, _mvfi))
+
+    r = cfg["run"]
+    PRO_CHUNK_HOURS = int(r.get("pro_chunk_hours", 720))
 
     sd = cfg["snow_defaults"]
     DEFAULT_CONDUC_S    = float(sd["conduc_s"])
@@ -2952,6 +2958,67 @@ class SnowpackDaemon:
             self.proc.wait()
 
 
+def rotate_pro_chunk(pro_path: Path, chunk_dir: Path, chunk_idx: int) -> None:
+    """Move the current .pro to chunks/chunk_NNNN.pro for later concatenation."""
+    chunk_dir.mkdir(exist_ok=True)
+    chunk_path = chunk_dir / f"chunk_{chunk_idx:04d}.pro"
+    shutil.move(str(pro_path), str(chunk_path))
+    print(f"Pro chunk {chunk_idx}: rotated to {chunk_path.name} "
+          f"({chunk_path.stat().st_size / 1e6:.1f} MB)")
+
+
+def _pro_is_data_line(line: str) -> bool:
+    """True if a 0500, line is an actual timestep record (DD.MM.YYYY format)."""
+    return bool(re.match(r"^0500,\d{2}\.\d{2}\.\d{4}", line))
+
+
+def concatenate_pro_chunks(pro_path: Path) -> None:
+    """Merge all chunk files + current .pro into the final .pro, then delete chunks.
+
+    Takes the header (everything before the first timestep) from chunk 0 and
+    appends only the data records from each subsequent source in order.
+    """
+    chunk_dir = pro_path.parent / "chunks"
+    if not chunk_dir.exists():
+        return
+    chunks = sorted(chunk_dir.glob("chunk_*.pro"))
+    if not chunks:
+        return
+
+    print(f"Concatenating {len(chunks)} .pro chunk(s) → {pro_path.name} …")
+    tmp_path = pro_path.with_name(pro_path.name + ".concat_tmp")
+
+    header_lines: list[str] = []
+    with open(chunks[0], encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if _pro_is_data_line(line):
+                break
+            header_lines.append(line)
+
+    with open(tmp_path, "w", encoding="utf-8") as out:
+        out.writelines(header_lines)
+        for src in list(chunks) + ([pro_path] if pro_path.exists() else []):
+            with open(src, encoding="utf-8", errors="replace") as fh:
+                in_data = False
+                for line in fh:
+                    if not in_data and _pro_is_data_line(line):
+                        in_data = True
+                    if in_data:
+                        out.write(line)
+
+    tmp_path.replace(pro_path)
+    for chunk in chunks:
+        try:
+            chunk.unlink()
+        except OSError:
+            pass
+    try:
+        chunk_dir.rmdir()
+    except OSError:
+        pass
+    print(f"Concatenation complete: {pro_path.stat().st_size / 1e6:.1f} MB")
+
+
 def cycle_hourly_snowpack_with_moving_profile(
     temp_hourly: pd.DataFrame,
     long_df: pd.DataFrame,
@@ -2962,6 +3029,7 @@ def cycle_hourly_snowpack_with_moving_profile(
     water_transport: str = "adaptive",
     assimilation_interval_h: int = 1,
     use_daemon: bool = False,
+    pro_chunk_hours: int = 0,
 ) -> None:
     """Run SNOWPACK hour-by-hour with temperature assimilation.
 
@@ -3012,6 +3080,17 @@ def cycle_hourly_snowpack_with_moving_profile(
         using_re = switched
 
     bucket_fallback_remaining = 0
+
+    # Per-step tracking: .pro chunking, water-transport log, ETA status
+    _chunk_idx: int = 0
+    _steps_since_chunk: int = 0
+    _run_start_model: "pd.Timestamp | None" = None
+    _run_start_wall:  "datetime | None" = None
+
+    # Initialise water-transport log header if the file does not yet exist
+    _wt_log_path = OUTPUT_DIR / "water_transport_log.csv"
+    if not _wt_log_path.exists():
+        _wt_log_path.write_text("datetime,scheme\n", encoding="utf-8")
 
     if i_start == 0:
         apply_initial_temperature_adjustment(
@@ -3125,8 +3204,35 @@ def cycle_hourly_snowpack_with_moving_profile(
                         start_time=t0, end_time=t1, work_dir=PROJECT_DIR,
                     )
 
+        # ── .pro chunk rotation (daemon mode) ────────────────────────── #
+        # Rotate before the step so the new daemon writes to a fresh .pro.
+        elif (pro_chunk_hours > 0
+              and _steps_since_chunk >= pro_chunk_hours
+              and daemon is not None):
+            _pro_now = next(iter(OUTPUT_DIR.glob("*_TEMP_ASSIM_RUN.pro")), None)
+            if _pro_now is not None and _pro_now.exists():
+                rotate_pro_chunk(_pro_now, OUTPUT_DIR / "chunks", _chunk_idx)
+                _chunk_idx += 1
+            _steps_since_chunk = 0
+            daemon.respawn(SNOWPACK_EXE, ini_file, PROJECT_DIR, t0, t1)
+            daemon.wait_for_checkpoint(timeout_s=900)
+            ok, msg = True, ""
+            _pending_adjustments = None
+            _settemps_steps_since_sno_write = 0
+
         # ── Normal step ───────────────────────────────────────────────── #
         else:
+            # Non-daemon chunk rotation: move .pro before this step so SNOWPACK
+            # creates a fresh one (daemon-less mode only; daemon mode uses respawn above).
+            if (pro_chunk_hours > 0
+                    and _steps_since_chunk >= pro_chunk_hours
+                    and daemon is None):
+                _pro_now = next(iter(OUTPUT_DIR.glob("*_TEMP_ASSIM_RUN.pro")), None)
+                if _pro_now is not None and _pro_now.exists():
+                    rotate_pro_chunk(_pro_now, OUTPUT_DIR / "chunks", _chunk_idx)
+                    _chunk_idx += 1
+                _steps_since_chunk = 0
+
             if daemon and i > i_start:
                 if _pending_adjustments is not None:
                     cp, msg = daemon.settemps_and_run(_pending_adjustments, t1, timeout_s=900)
@@ -3182,6 +3288,25 @@ def cycle_hourly_snowpack_with_moving_profile(
 
         if not ok:
             raise RuntimeError("SNOWPACK failed\n" + msg)
+
+        # ── Per-step diagnostics: water-transport log + ETA status ───── #
+        _step_wall = datetime.now(timezone.utc)
+        _scheme_str = "RICHARDSEQUATION" if using_re else "BUCKET"
+        with open(_wt_log_path, "a", encoding="utf-8") as _wf:
+            _wf.write(f"{t1.isoformat()},{_scheme_str}\n")
+        if _run_start_wall is None:
+            _run_start_wall  = _step_wall
+            _run_start_model = t1
+        _run_status = {
+            "run_start_model": _run_start_model.isoformat(),
+            "run_start_wall":  _run_start_wall.isoformat(),
+            "step_model":      t1.isoformat(),
+            "step_wall":       _step_wall.isoformat(),
+        }
+        (OUTPUT_DIR / "run_status.json").write_text(
+            json.dumps(_run_status), encoding="utf-8"
+        )
+        _steps_since_chunk += 1
 
         latest_sno = get_latest_sno_file(CURRENT_SNOW_DIR, fallback_root=PROJECT_DIR)
 
@@ -3291,6 +3416,14 @@ def cycle_hourly_snowpack_with_moving_profile(
     finally:
         if daemon is not None:
             daemon.quit()
+        # Merge any .pro chunks into the final .pro (runs on both clean finish and crash)
+        if pro_chunk_hours > 0:
+            _pro_final = next(iter(OUTPUT_DIR.glob("*_TEMP_ASSIM_RUN.pro")), None)
+            if _pro_final is not None:
+                try:
+                    concatenate_pro_chunks(_pro_final)
+                except Exception as _e:
+                    print(f"Warning: .pro chunk concatenation failed: {_e}")
 
 
 # =============================================================================
@@ -3329,6 +3462,21 @@ def main() -> None:
             + ([PROJECT_DIR / "autorun.log"] if (PROJECT_DIR / "autorun.log").exists() else [])
         )
         _files_to_clear = [f for f in _files_to_clear if f.exists()]
+
+        # Always delete (never archive) the per-run diagnostic files so they
+        # don't mix data from different runs.
+        for _diag in ["run_status.json", "water_transport_log.csv"]:
+            _dp = OUTPUT_DIR / _diag
+            if _dp.exists():
+                _dp.unlink()
+        _chunks_dir = OUTPUT_DIR / "chunks"
+        if _chunks_dir.exists():
+            for _cf in _chunks_dir.glob("chunk_*.pro"):
+                _cf.unlink()
+            try:
+                _chunks_dir.rmdir()
+            except OSError:
+                pass
 
         if _files_to_clear:
             if args.fresh_mode == "archive":
@@ -3469,6 +3617,7 @@ def main() -> None:
         water_transport=args.water_transport if args.water_transport is not None else WATER_TRANSPORT,
         assimilation_interval_h=ASSIMILATION_INTERVAL_H,
         use_daemon=USE_DAEMON,
+        pro_chunk_hours=PRO_CHUNK_HOURS,
     )
 
     # Generate static PNG figures via visualize_pro.py

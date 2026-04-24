@@ -317,6 +317,32 @@ def find_pro_file(sid: str) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def read_run_status(sid: str) -> "dict | None":
+    """Return the run_status.json dict written by autorun_snowpack.py, or None."""
+    p = project_dir(sid) / "output" / "run_status.json"
+    if not p.exists():
+        return None
+    try:
+        import json
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def read_water_transport_log(sid: str) -> "pd.DataFrame | None":
+    """Return the water_transport_log.csv as a DataFrame (datetime index, scheme column)."""
+    p = project_dir(sid) / "output" / "water_transport_log.csv"
+    if not p.exists():
+        return None
+    try:
+        df = pd.read_csv(p, parse_dates=["datetime"])
+        df = df.drop_duplicates(subset="datetime", keep="last")
+        df = df.set_index("datetime").sort_index()
+        return df
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Swiss grain type catalog (same as visualize_pro.py)
 # ---------------------------------------------------------------------------
@@ -1467,7 +1493,7 @@ with tab_run:
             else:
                 st.status("Not started", state="error")
 
-        # Progress bar
+        # Progress bar with ETA
         t_start, t_end = get_expected_date_range(sid)
         t_cur = get_pro_current_time(sid)
         # Suppress stale .pro data if a fresh run was launched this session
@@ -1481,16 +1507,41 @@ with tab_run:
             total_s   = (t_end   - t_start).total_seconds()
             elapsed_s = (t_cur   - t_start).total_seconds()
             frac = float(max(0.0, min(1.0, elapsed_s / total_s))) if total_s > 0 else 0.0
+            eta_str = ""
+            if running:
+                _rs = read_run_status(sid)
+                if _rs:
+                    try:
+                        _rs_model = pd.Timestamp(_rs["run_start_model"])
+                        _rs_wall  = pd.Timestamp(_rs["run_start_wall"])
+                        _s_model  = pd.Timestamp(_rs["step_model"])
+                        _s_wall   = pd.Timestamp(_rs["step_wall"])
+                        _model_el = (_s_model - _rs_model).total_seconds()
+                        _wall_el  = (_s_wall  - _rs_wall ).total_seconds()
+                        if _model_el > 0 and _wall_el > 0:
+                            _rate = _model_el / _wall_el
+                            _rem  = (t_end - t_cur).total_seconds()
+                            _eta  = _rem / _rate
+                            if _eta > 7200:
+                                eta_str = f"  · ETA {_eta / 3600:.1f} h"
+                            elif _eta > 120:
+                                eta_str = f"  · ETA {_eta / 60:.0f} min"
+                            else:
+                                eta_str = "  · ETA <2 min"
+                    except Exception:
+                        pass
             label = (
                 f"{t_cur.strftime('%Y-%m-%d')} / {t_end.strftime('%Y-%m-%d')}"
-                f"  ({frac * 100:.0f}%)"
+                f"  ({frac * 100:.0f}%){eta_str}"
             )
             st.progress(frac, text=label)
         elif running:
             st.progress(0.0, text="Starting…")
 
-        # Only show log when the run has crashed
-        if crashed:
+        # Show crash log only when stopped/crashed AND no recent launch has been
+        # triggered this session (avoids showing stale log during startup lag).
+        _recently_launched = bool(_fresh_t)
+        if crashed and not _recently_launched:
             st.markdown("**Run log (crash output):**")
             st.code(_strip_path_lines(read_log_tail(sid, 100)), language="text")
 
@@ -1535,6 +1586,13 @@ with tab_settings:
                     min_value=1, max_value=720, step=1,
                     help="Hours to run BUCKET before switching to RE (adaptive mode only). "
                          "Keep short (15 h) so the switch happens before surface melt begins.")
+                doc["run"]["pro_chunk_hours"] = st.number_input(
+                    ".pro chunk size (model hours, 0 = off)",
+                    value=int(doc["run"].get("pro_chunk_hours", 720)),
+                    min_value=0, max_value=8760, step=24,
+                    help="Split .pro output every N model hours; chunks are concatenated "
+                         "into the final file at run end. Keeps individual files manageable "
+                         "on multi-year runs. 0 disables chunking.")
                 doc["run"]["assimilation_interval_h"] = c4.number_input(
                     "Assimilation interval (hours)",
                     value=int(doc["run"].get("assimilation_interval_h", 1)),

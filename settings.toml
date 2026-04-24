@@ -24,6 +24,10 @@ water_transport = "adaptive"
 # before surface melt begins. The old default of 15 days could land the switch
 # in peak melt season, causing RE convergence failures.
 stabilization_hours = 15
+# Split .pro output into chunks of this many model hours; concatenated at run
+# end so the final file is seamless. Keeps individual files manageable on long
+# runs. Set to 0 to disable chunking.
+pro_chunk_hours = 720
 # Hours between temperature assimilation steps (1 = every hour, 6 = every 6 h, etc.)
 assimilation_interval_h = 1
 # Run working files (SNO, cfgfiles, current_snow) from /dev/shm RAM disk for faster I/O

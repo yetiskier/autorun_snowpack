@@ -620,3 +620,19 @@ Typical firn (most of the column) runs at ~1.5× the old fixed value.
 - Mass: ρ_i × θ_i × thick = const ✓ (restart paths); small error on initialization (measurement noise)
 - Sensible heat: ρ_i × c_i × T × θ_i × thick = const ✓ (restart paths)
 - Latent heat budget: conserved since ice mass is conserved ✓
+
+## Update — 2026-04-24 (2)
+
+### Four run-quality improvements
+
+**1. BUCKET/RE tracking log (`output/water_transport_log.csv`)**
+Every completed step appends a row `datetime,scheme` ("BUCKET" or "RICHARDSEQUATION") to `output/water_transport_log.csv`. File is created at the start of a run (or on the first step of a resume if not present). Readable via `read_water_transport_log(sid)` in `app.py`, which deduplicates by timestamp keeping the last write. Suitable for overlaying on plots to show which conditions triggered RE→BUCKET fallbacks.
+
+**2. ETA in progress bar**
+`autorun_snowpack.py` writes `output/run_status.json` at each step with `run_start_model`, `run_start_wall`, `step_model`, `step_wall`. The app reads this and computes current model-steps-per-second rate → ETA displayed as "· ETA X.X h / N min / <2 min" appended to the progress bar label. Only shown while running; rate resets on each resume.
+
+**3. .pro file chunking (`pro_chunk_hours`, default 720)**
+New setting `[run] pro_chunk_hours = 720`. Every 720 model hours in daemon mode: current `.pro` is moved to `output/chunks/chunk_NNNN.pro`, the daemon is respawned (which also runs the current step on a fresh file). At run end (or crash), `concatenate_pro_chunks()` merges all chunks + current `.pro` into the final `.pro` by taking the header from chunk 0 and appending data records from all sources. Non-daemon mode: file is rotated before `run_snowpack_one_step`. `chunks/` and diagnostic files are cleared on fresh start.
+
+**4. Crash log hidden while running**
+The crash log now uses `_recently_launched = bool(_fresh_t)` to suppress display immediately after a launch is triggered, preventing the old crash log from showing during the startup lag before the new process is confirmed running.
