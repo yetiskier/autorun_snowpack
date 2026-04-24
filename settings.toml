@@ -18,7 +18,12 @@ run_until = ""
 keep_hourly_archives = false
 keep_last_n_sno = 3
 # Water transport scheme: "adaptive", "BUCKET", or "RICHARDSEQUATION"
-water_transport = "BUCKET"
+water_transport = "adaptive"
+# Hours to run BUCKET before switching to RICHARDSEQUATION (adaptive mode only).
+# Switch early (15 h) so the RE solver spins up in cold/dry conditions well
+# before surface melt begins. The old default of 15 days could land the switch
+# in peak melt season, causing RE convergence failures.
+stabilization_hours = 15
 # Hours between temperature assimilation steps (1 = every hour, 6 = every 6 h, etc.)
 assimilation_interval_h = 1
 # Run working files (SNO, cfgfiles, current_snow) from /dev/shm RAM disk for faster I/O
@@ -80,7 +85,7 @@ basal_temp_min_c          = -40.0
 [assimilation]
 temp_min_c               = -60.0
 temp_max_c               = 0.0
-max_adjust_per_hour_c    = 1.0
+max_adjust_per_hour_c    = 5.0
 min_obs_for_adjust       = 3
 # Wet layers are only drained when observed T is below this threshold (°C).
 wet_layer_drain_threshold_c = -1.0

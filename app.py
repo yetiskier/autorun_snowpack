@@ -1519,7 +1519,7 @@ with tab_settings:
                     "Data root (blank = auto)", value=str(doc["paths"].get("data_root", "")))
 
             with st.expander("Run", expanded=True):
-                c1, c2, c3 = st.columns(3)
+                c1, c2, c3, c4 = st.columns(4)
                 doc["run"]["run_until"] = c1.text_input(
                     "Stop at (blank = full record)",
                     value=str(doc["run"].get("run_until", "")))
@@ -1529,7 +1529,13 @@ with tab_settings:
                     "Water transport",
                     options=_wt_options,
                     index=_wt_options.index(_wt_current) if _wt_current in _wt_options else 0)
-                doc["run"]["assimilation_interval_h"] = c3.number_input(
+                doc["run"]["stabilization_hours"] = c3.number_input(
+                    "RE stabilisation (hours)",
+                    value=int(doc["run"].get("stabilization_hours", 15)),
+                    min_value=1, max_value=720, step=1,
+                    help="Hours to run BUCKET before switching to RE (adaptive mode only). "
+                         "Keep short (15 h) so the switch happens before surface melt begins.")
+                doc["run"]["assimilation_interval_h"] = c4.number_input(
                     "Assimilation interval (hours)",
                     value=int(doc["run"].get("assimilation_interval_h", 1)),
                     min_value=1, max_value=24, step=1,

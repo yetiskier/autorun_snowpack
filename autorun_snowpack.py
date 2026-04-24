@@ -129,6 +129,7 @@ MIN_OBS_FOR_ADJUST      : int
 WET_LAYER_DRAIN_THRESHOLD_C : float
 
 WATER_TRANSPORT          : str
+STABILIZATION_HOURS      : int
 ASSIMILATION_INTERVAL_H  : int
 USE_RAMDISK              : bool
 USE_DAEMON               : bool
@@ -264,7 +265,7 @@ def configure(args: argparse.Namespace, cfg: dict) -> None:
     global ADD_BASAL_LAYERS, BASAL_LAYER_THICKNESSES_M, BASAL_TREND_LOOKBACK_M, BASAL_TEMP_MIN_C
     global TEMP_MIN_C, TEMP_MAX_C, MAX_ADJUST_PER_HOUR_C, MIN_OBS_FOR_ADJUST, ASSIMILATION_INTERVAL_H
     global WET_LAYER_DRAIN_THRESHOLD_C
-    global WATER_TRANSPORT, USE_RAMDISK, USE_DAEMON, DISK_INPUT_DIR
+    global WATER_TRANSPORT, STABILIZATION_HOURS, USE_RAMDISK, USE_DAEMON, DISK_INPUT_DIR
     global FORCING_TA_MULT, FORCING_TA_ADD, FORCING_RH_MULT, FORCING_RH_ADD
     global FORCING_VW_MULT, FORCING_VW_ADD, FORCING_ISWR_MULT, FORCING_ISWR_ADD
     global FORCING_ILWR_MULT, FORCING_ILWR_ADD, FORCING_PSUM_MULT, FORCING_PSUM_ADD
@@ -374,6 +375,7 @@ def configure(args: argparse.Namespace, cfg: dict) -> None:
     KEEP_HOURLY_ARCHIVES    = bool(cfg["run"]["keep_hourly_archives"])
     KEEP_LAST_N_SNO         = int(cfg["run"]["keep_last_n_sno"])
     WATER_TRANSPORT         = str(cfg["run"].get("water_transport", "adaptive"))
+    STABILIZATION_HOURS     = int(cfg["run"].get("stabilization_hours", 15))
     ASSIMILATION_INTERVAL_H = int(cfg["run"].get("assimilation_interval_h", 1))
     USE_RAMDISK             = bool(cfg["run"].get("use_ramdisk", False))
     USE_DAEMON              = bool(cfg["run"].get("use_daemon", False))
@@ -2923,7 +2925,7 @@ def cycle_hourly_snowpack_with_moving_profile(
     ini_file: Path,
     input_sno_file: Path,
     alpha: float,
-    stabilization_days: int = 15,
+    stabilization_hours: int = 15,
     water_transport: str = "adaptive",
     assimilation_interval_h: int = 1,
     use_daemon: bool = False,
@@ -2931,20 +2933,18 @@ def cycle_hourly_snowpack_with_moving_profile(
     """Run SNOWPACK hour-by-hour with temperature assimilation.
 
     water_transport:
-      'adaptive'        – BUCKET for stabilisation_days then RICHARDSEQUATION
+      'adaptive'        – BUCKET for stabilization_hours then RICHARDSEQUATION
                           with automatic BUCKET fallback on convergence failure.
       'BUCKET'          – BUCKET throughout; no RE switch, no fallback.
       'RICHARDSEQUATION'– RE throughout from step 0; no stabilisation phase.
 
-    Uses BUCKET water transport for the first ``stabilization_days`` days so
+    Uses BUCKET water transport for the first ``stabilization_hours`` hours so
     the highly-icy initial profile can equilibrate, then rewrites the INI to
     RICHARDSEQUATION + FREEDRAINAGE for the remainder of the run.
     """
     times = temp_hourly.index
     if len(times) < 2:
         raise ValueError("Need at least two hourly timestamps.")
-
-    stabilization_hours = stabilization_days * 24
 
     # ── Resume detection ──────────────────────────────────────────────── #
     # If the .sno file's ProfileDate is already ahead of times[0], we are
@@ -3432,7 +3432,7 @@ def main() -> None:
         ini_file=CFG_INI_FILE,
         input_sno_file=INITIAL_SNO_FILE,
         alpha=ALPHA,
-        stabilization_days=15,
+        stabilization_hours=STABILIZATION_HOURS,
         water_transport=args.water_transport if args.water_transport is not None else WATER_TRANSPORT,
         assimilation_interval_h=ASSIMILATION_INTERVAL_H,
         use_daemon=USE_DAEMON,
