@@ -544,6 +544,7 @@ python compare_runs.py \
 | RE warning spam in log | RE SafeMode is very verbose | `_LOG_FILTER` regex in `app.py` suppresses it in the UI |
 | CP obs vs model parse error | Trailing comma in `.pro` produces empty string token | `float(v) for v in parts if v.strip()` guard in parse_pro |
 | run_status.json missing / ETA not showing | Model process started before ETA code was committed | Restart the run; ETA only works with code from 2026-04-24 onward |
+| SNOWPACK exits immediately with zero steps on new site (ramdisk) | `_setup_ramdisk` creates the SMET symlink only if the disk file already exists; on a first run the file is downloaded after ramdisk setup, leaving ramdisk `input/` without a link — SNOWPACK finds zero stations | Fixed: after `build_smet_from_downloaded_era`, a symlink is created in ramdisk `input/` if it is missing |
 
 ---
 

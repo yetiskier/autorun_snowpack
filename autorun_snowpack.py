@@ -3609,6 +3609,16 @@ def main() -> None:
             meta=meta,
         )
 
+        # Ensure the ramdisk input/ has a symlink to the SMET.
+        # _setup_ramdisk only creates it when the disk file already exists, but
+        # on a new site the SMET is downloaded after ramdisk setup, leaving the
+        # ramdisk input/ without a link → SNOWPACK finds zero stations and exits.
+        if USE_RAMDISK:
+            _ram_smet = INPUT_DIR / FORCING_SMET_FILE.name
+            if not _ram_smet.exists():
+                _ram_smet.symlink_to(DISK_INPUT_DIR / FORCING_SMET_FILE.name)
+                print(f"Ramdisk: created SMET symlink → {FORCING_SMET_FILE.name}")
+
         write_ini_file(
             out_path=CFG_INI_FILE,
             smet_name=FORCING_SMET_FILE.name,
