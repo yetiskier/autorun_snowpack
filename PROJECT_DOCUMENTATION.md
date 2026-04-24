@@ -120,7 +120,7 @@ SNOWPACK supports two water transport schemes:
 
 **Adaptive strategy** (default `water_transport = "adaptive"` in settings.toml):
 
-1. First `stabilization_days` (default 15 days) always use BUCKET.
+1. First `stabilization_hours` (default 15 hours) always use BUCKET.
 2. Switch to RE after stabilisation.
 3. If RE reports `"Richards-Equation solver: no convergence"` (SafeMode or timeout):
    - Switch to BUCKET immediately.
