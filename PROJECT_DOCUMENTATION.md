@@ -636,3 +636,16 @@ New setting `[run] pro_chunk_hours = 720`. Every 720 model hours in daemon mode:
 
 **4. Crash log hidden while running**
 The crash log now uses `_recently_launched = bool(_fresh_t)` to suppress display immediately after a launch is triggered, preventing the old crash log from showing during the startup lag before the new process is confirmed running.
+
+## Update — 2026-04-24 (3)
+
+### Water-transport log: event-based with dense expansion at run end
+
+Replaced per-step write with a two-stage approach:
+- **During run**: only the initial scheme and subsequent transitions are written to `output/water_transport_events.csv` (sparse; typically 2–5 rows per run). The events file is rewritten each time a scheme change is detected, so it survives crashes.
+- **At run end / crash (finally block)**: events are expanded into a dense per-step `output/water_transport_log.csv` (one row per completed hourly step) by walking the events list. The `_step_scheme` variable captures the scheme that actually ran each step, including the case where RE SafeMode fires and the step completes via RE but future steps fall back to BUCKET.
+
+`read_water_transport_log(sid)` in `app.py` reads the dense CSV (deduplicates by keeping last entry per timestamp, returns datetime-indexed DataFrame with `scheme` column).
+
+### ETA note
+The `run_status.json` and ETA display will appear on the first run started after today's commits. Runs started before the commit (currently running T3) use the old code and won't write the file.

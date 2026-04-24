@@ -3081,16 +3081,19 @@ def cycle_hourly_snowpack_with_moving_profile(
 
     bucket_fallback_remaining = 0
 
-    # Per-step tracking: .pro chunking, water-transport log, ETA status
+    # Per-step tracking: .pro chunking, ETA status
     _chunk_idx: int = 0
     _steps_since_chunk: int = 0
     _run_start_model: "pd.Timestamp | None" = None
     _run_start_wall:  "datetime | None" = None
 
-    # Initialise water-transport log header if the file does not yet exist
-    _wt_log_path = OUTPUT_DIR / "water_transport_log.csv"
-    if not _wt_log_path.exists():
-        _wt_log_path.write_text("datetime,scheme\n", encoding="utf-8")
+    # Water-transport event log: records only scheme transitions.
+    # Expanded to a dense per-step CSV at run end / crash (in the finally block).
+    _wt_initial_scheme = "RICHARDSEQUATION" if using_re else "BUCKET"
+    _wt_events: list[tuple[pd.Timestamp, str]] = [(times[i_start], _wt_initial_scheme)]
+    _wt_last_scheme: str = _wt_initial_scheme
+    _wt_completed: list[pd.Timestamp] = []
+    _wt_events_path = OUTPUT_DIR / "water_transport_events.csv"
 
     if i_start == 0:
         apply_initial_temperature_adjustment(
@@ -3254,6 +3257,8 @@ def cycle_hourly_snowpack_with_moving_profile(
         # ── RE convergence failure → fall back to BUCKET (adaptive only) ─ #
         # Must be checked BEFORE the ok-guard so a RE timeout triggers a
         # BUCKET retry of the same step rather than an immediate crash.
+        # Capture the scheme that ran THIS step before using_re can change.
+        _step_scheme = "RICHARDSEQUATION" if using_re else "BUCKET"
         if water_transport == "adaptive" and using_re and "Richards-Equation solver: no convergence" in msg:
             write_ini_file(
                 out_path=ini_file,
@@ -3266,6 +3271,7 @@ def cycle_hourly_snowpack_with_moving_profile(
 
             if not ok:
                 # RE timed out — retry this step with BUCKET
+                _step_scheme = "BUCKET"
                 print(f"{t0}→{t1}: RE timed out with convergence failures; "
                       f"retrying with BUCKET (fallback for 24 h)")
                 if daemon:
@@ -3289,11 +3295,8 @@ def cycle_hourly_snowpack_with_moving_profile(
         if not ok:
             raise RuntimeError("SNOWPACK failed\n" + msg)
 
-        # ── Per-step diagnostics: water-transport log + ETA status ───── #
+        # ── Per-step diagnostics: ETA status + water-transport events ─── #
         _step_wall = datetime.now(timezone.utc)
-        _scheme_str = "RICHARDSEQUATION" if using_re else "BUCKET"
-        with open(_wt_log_path, "a", encoding="utf-8") as _wf:
-            _wf.write(f"{t1.isoformat()},{_scheme_str}\n")
         if _run_start_wall is None:
             _run_start_wall  = _step_wall
             _run_start_model = t1
@@ -3306,6 +3309,15 @@ def cycle_hourly_snowpack_with_moving_profile(
         (OUTPUT_DIR / "run_status.json").write_text(
             json.dumps(_run_status), encoding="utf-8"
         )
+        # Record completed step; write events file only on scheme transition
+        _wt_completed.append(t1)
+        if _step_scheme != _wt_last_scheme:
+            _wt_events.append((t1, _step_scheme))
+            _wt_last_scheme = _step_scheme
+            with open(_wt_events_path, "w", encoding="utf-8") as _wf:
+                _wf.write("datetime,scheme\n")
+                for _ev_t, _ev_s in _wt_events:
+                    _wf.write(f"{_ev_t.isoformat()},{_ev_s}\n")
         _steps_since_chunk += 1
 
         latest_sno = get_latest_sno_file(CURRENT_SNOW_DIR, fallback_root=PROJECT_DIR)
@@ -3416,6 +3428,7 @@ def cycle_hourly_snowpack_with_moving_profile(
     finally:
         if daemon is not None:
             daemon.quit()
+
         # Merge any .pro chunks into the final .pro (runs on both clean finish and crash)
         if pro_chunk_hours > 0:
             _pro_final = next(iter(OUTPUT_DIR.glob("*_TEMP_ASSIM_RUN.pro")), None)
@@ -3424,6 +3437,26 @@ def cycle_hourly_snowpack_with_moving_profile(
                     concatenate_pro_chunks(_pro_final)
                 except Exception as _e:
                     print(f"Warning: .pro chunk concatenation failed: {_e}")
+
+        # Expand sparse water-transport events to a dense per-step CSV
+        if _wt_completed:
+            try:
+                _dense_rows = ["datetime,scheme\n"]
+                _ev_idx = 0
+                _cur_scheme = _wt_events[0][1]
+                for _step_t in _wt_completed:
+                    while (_ev_idx + 1 < len(_wt_events)
+                           and _wt_events[_ev_idx + 1][0] <= _step_t):
+                        _ev_idx += 1
+                        _cur_scheme = _wt_events[_ev_idx][1]
+                    _dense_rows.append(f"{_step_t.isoformat()},{_cur_scheme}\n")
+                (OUTPUT_DIR / "water_transport_log.csv").write_text(
+                    "".join(_dense_rows), encoding="utf-8"
+                )
+                print(f"Water-transport log: {len(_wt_completed)} steps, "
+                      f"{len(_wt_events)} transition(s)")
+            except Exception as _e:
+                print(f"Warning: water-transport log expansion failed: {_e}")
 
 
 # =============================================================================
@@ -3465,7 +3498,7 @@ def main() -> None:
 
         # Always delete (never archive) the per-run diagnostic files so they
         # don't mix data from different runs.
-        for _diag in ["run_status.json", "water_transport_log.csv"]:
+        for _diag in ["run_status.json", "water_transport_log.csv", "water_transport_events.csv"]:
             _dp = OUTPUT_DIR / _diag
             if _dp.exists():
                 _dp.unlink()
