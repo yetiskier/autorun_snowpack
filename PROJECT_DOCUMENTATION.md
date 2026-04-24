@@ -1,10 +1,6 @@
 # SNOWPACK Autorun — Project Documentation
 
-> **For Claude Code sessions**: Read this file at the start of any session on this project to quickly get up to speed. The working directory is `/home/yeti/Documents/autorun_snowpack/` (or a site subdirectory). The primary files to understand are `autorun_snowpack.py`, `app.py`, and `compare_runs.py`.
->
-> **At the end of every session, append a new dated section** (format: `## Update — YYYY-MM-DD`) summarising any new work: algorithms changed, bugs fixed, runs started/finished, design decisions made. Keep it concise but complete enough that the next session needs no extra context.
->
-> **Commit and push to GitHub after every meaningful change** to `autorun_snowpack.py` or `app.py`.
+> **For Claude Code sessions**: Read this file at the start of every session. Working directory: `/home/yeti/Documents/autorun_snowpack/`. Primary files: `autorun_snowpack.py`, `app.py`, `settings.toml`. After completing any meaningful change: update this file, then `git add`, `git commit`, `git push` — always in that order, always in the same turn as the code change. Never end a session with uncommitted work.
 
 ---
 
@@ -14,12 +10,13 @@ Automated end-to-end pipeline for running the SNOWPACK snow/firn model on boreho
 
 1. Reads hourly temperature observations from boreholes (CSV).
 2. Downloads ERA5 meteorological forcing (via CDS API).
-3. Writes SNOWPACK input files (`.sno` initial profile, `.ini` configuration).
+3. Builds SNOWPACK input files (`.sno` initial profile, `.ini` configuration).
 4. Runs SNOWPACK hour-by-hour with temperature assimilation — nudging the modelled firn temperature profile toward observations.
 5. Outputs a `.pro` timeseries file of modelled snow/firn properties.
 6. Visualises results interactively via a Streamlit web app.
 
 **SNOWPACK binary**: `/home/yeti/snowmodel/snowpack-master/bin/snowpack`
+(Patched and recompiled — see §12. Do not replace with stock binaries.)
 
 ---
 
@@ -33,19 +30,20 @@ Automated end-to-end pipeline for running the SNOWPACK snow/firn model on boreho
 ├── visualize_pro.py         # Standalone static plot helper
 ├── settings.toml            # Shared runtime settings (paths, physics, assimilation)
 ├── hole_locations_2025.csv  # Site lat/lon/elevation lookup table
-├── AllCoreDataCommonFormat/ # Raw borehole temperature CSVs (all sites)
-│   ├── Concatenated_Temperature_files/
-│   └── Depth_change_estimate/PROMICE/   # Cumulative surface height change
 │
-├── plot_obs_vs_model.py     # Generate observed vs modelled figures for all sites
-├── plot_T4_obs_vs_model.py  # T4-specific obs vs model (legacy, kept for app Regenerate button)
+├── AllCoreDataCommonFormat/
+│   ├── Concatenated_Temperature_files/    # Borehole temperature CSVs, all sites
+│   └── Depth_change_estimate/PROMICE/     # Cumulative surface height change
+│
+├── plot_obs_vs_model.py                           # Observed vs modelled figures (all sites)
+├── plot_T4_obs_vs_model.py                        # T4-specific legacy script (kept for app button)
 ├── plot_UP18_obs_vs_model.py
-├── plot_observed_temps.py               # Full 2022–2025 multi-site temperature heatmap
-├── plot_observed_temps_2023.py          # 2023 summer window, no depth correction
-├── plot_observed_temps_2023_depth_corrected.py  # 2023 summer, PROMICE depth correction
+├── plot_observed_temps.py                         # Full 2022–2025 multi-site temperature heatmap
+├── plot_observed_temps_2023.py                    # 2023 summer, no depth correction
+├── plot_observed_temps_2023_depth_corrected.py    # 2023 summer, PROMICE depth correction
 │
 ├── 2007_T2_10m/             # Site directory — canonical adaptive-RE run
-├── 2007_T2_10m_bucket/      # Same site, BUCKET-only comparison run
+├── 2007_T2_10m_bucket/      # Same site, BUCKET-only comparison run (--run-tag bucket)
 ├── 2019_T2minus_32m/
 ├── 2022_T3_25m/
 ├── 2022_T4_25m/
@@ -56,11 +54,25 @@ Automated end-to-end pipeline for running the SNOWPACK snow/firn model on boreho
 
 Each site directory mirrors `{year}_{site}_{depth}m`. Output `.pro` files are named `{year}-{site}-{depth}m_TEMP_ASSIM_RUN.pro`.
 
+Each site run directory contains:
+```
+{site_dir}/
+├── input/          # initial_profile.sno, site_forcing.smet
+├── cfgfiles/       # site_run.ini (rewritten each step)
+├── current_snow/   # SNOWPACK checkpoint .sno files (rolling, keep_last_n_sno=3)
+├── output/         # .pro, .ini, .png, run_status.json, water_transport_*.csv
+│   └── chunks/     # Intermediate .pro chunks (merged at run end)
+├── era_tmp/        # ERA5 download cache
+└── cache/          # Geopotential .nc cache
+```
+
 ---
 
-## 3. Site Naming and CLI Invocation
+## 3. Running the Model
 
-**CRITICAL**: The `site_id` is constructed internally as `f"{year}_{site}_{depth}m"`. Always pass the components separately:
+### 3.1 CLI Invocation
+
+**CRITICAL**: The `site_id` is constructed as `f"{year}_{site}_{depth}m"`. Always pass components separately:
 
 ```bash
 # Correct
@@ -68,7 +80,6 @@ cd /home/yeti/Documents/autorun_snowpack
 python autorun_snowpack.py --site T3 --year 2022 --depth 25
 
 # WRONG — creates doubled site_id "2022_2022_T3_25m_25m"
-cd /home/yeti/Documents/autorun_snowpack/2022_T3_25m
 python autorun_snowpack.py --site 2022_T3_25m
 ```
 
@@ -79,11 +90,23 @@ python autorun_snowpack.py --site 2022_T3_25m
 | `--site SITE` | required | e.g. `T3`, `T2`, `T2minus` |
 | `--year YEAR` | required | e.g. `2022` |
 | `--depth DEPTH` | required | Sensor depth in metres, e.g. `25` |
-| `--run-tag TAG` | None | Appended to project_id for a parallel run without overwriting original data paths |
+| `--run-tag TAG` | None | Suffix for project_id; output goes to `{site_id}_{TAG}/` while data files still read from canonical `{site_id}/` |
 | `--water-transport` | None (uses settings.toml) | `adaptive` / `BUCKET` / `RICHARDSEQUATION` |
 | `--run-until DATE` | `""` | Stop early, e.g. `"2023-12-31 00:00"` |
+| `--fresh` | False | Wipe checkpoint before starting |
+| `--fresh-mode` | `archive` | `archive` (compress previous output) or `delete` |
 
-**`--run-tag` mechanics**: `project_id = f"{site_id}_{TAG}"`, so output goes to `2007_T2_10m_bucket/`. Data files (temperature CSV, ERA5 cache) still read from the canonical `site_id` directory. This allows running a different water transport scheme alongside the original.
+### 3.2 Starting a New Run vs Resuming
+
+**Resume** (default): If `input/initial_profile.sno` exists and its `ProfileDate` is later than the forcing start date, the loop fast-forwards to that timestamp. No flags needed — just re-run the same command.
+
+**Fresh start**: Use `--fresh` to wipe the checkpoint and restart from the beginning. The app's "Fresh start" checkbox does the same. The checkpoint lives in **two places** — both are cleared on fresh start:
+1. `{site_dir}/input/initial_profile.sno`
+2. `/dev/shm/snowpack_{sid}/input/initial_profile.sno` (ramdisk — persists across runs unless explicitly cleared)
+
+Fresh start can **archive** (recommended) or **delete** previous output. Archive writes `output/archives/run_YYYYMMDD_HHMMSS.tar.gz` containing the previous `.pro`, `.ini`, and `autorun.log`.
+
+**Always use `adaptive` water transport for these sites, not pure `RICHARDSEQUATION` from step 0.** Pure RE on a cold initial profile crashes immediately (SOLVER DUMP flood, ~3.5 M log lines, Python timeout after 900 s on step 1). The adaptive scheme runs BUCKET for stabilisation first.
 
 ---
 
@@ -92,560 +115,464 @@ python autorun_snowpack.py --site 2022_T3_25m
 ### 4.1 Startup Sequence
 
 1. Load `settings.toml`; CLI args override.
-2. Build `site_id` and `project_id`.
-3. Read borehole temperature CSV from `AllCoreDataCommonFormat/`.
-4. Write `.sno` initial snow/firn profile from observations (`write_sno_file`).
-5. Download or load ERA5 forcing cache.
-6. Write SNOWPACK `.ini` configuration (`write_ini_file`).
-7. **Checkpoint restore**: before `write_sno_file` runs, snapshot the existing `initial_profile.sno` bytes. After setup is complete, if the snapshot has a `ProfileDate` later than the new write, restore it — this preserves the resume point.
-8. Call `cycle_hourly_snowpack_with_moving_profile`.
+2. Build `site_id` / `project_id`.
+3. Read borehole temperature CSV (`AllCoreDataCommonFormat/`).
+4. **Checkpoint check**: read `ProfileDate` from existing `.sno`. If it is later than the first forcing timestamp, skip SNO build (resuming).
+5. If not resuming: build `.sno` from observed density + temperature profiles; download ERA5; write `.ini`.
+6. Call `cycle_hourly_snowpack_with_moving_profile`.
+7. After loop completes: call `plot_obs_vs_model.py {sid}` to regenerate the static PNG.
 
-### 4.2 Resume Detection
+### 4.2 Hourly Loop (`cycle_hourly_snowpack_with_moving_profile`)
 
-At the start of the hourly loop, `i_start` is determined by reading `ProfileDate` from the existing `.sno` file and finding the matching timestamp in the forcing array. The loop fast-forwards to that index without re-running already-completed steps.
+For each timestep `t0 → t1`:
+1. Check for scheme switch / chunk rotation (see §5, §9).
+2. Run SNOWPACK (daemon or subprocess).
+3. Check for RE convergence failure (must come **before** `if not ok: raise`).
+4. Write per-step diagnostics: `run_status.json`, water-transport event check.
+5. Validate SNO geometry.
+6. Assimilate temperature (see §6).
+7. Sync checkpoint SNO to disk (if using ramdisk and SNO was written this step).
 
-### 4.3 Hourly Loop
+---
 
-For each timestep:
-- Advance the sensor depth (linear interpolation over the burial record).
-- Assimilate temperature: compare modelled profile to observed, nudge layer temperatures toward observations (`alpha=0.1` blending coefficient).
-- Run SNOWPACK for one 15-minute step (or the configured `calculation_step_length_min`).
+## 5. Water Transport Scheme
 
-### 4.4 Water Transport — Adaptive Mode
+### 5.1 Background
 
 SNOWPACK supports two water transport schemes:
+- **BUCKET**: simple bucket-fill. Always stable, fast, less physically accurate.
+- **RICHARDSEQUATION (RE)**: solves Richards equation. More physically correct for liquid water percolation, but can fail to converge on saturated or near-ice firn.
 
-- **BUCKET**: simple bucket-fill, always stable, less physically accurate.
-- **RICHARDSEQUATION (RE)**: solves Richards equation, more physically correct, but can fail to converge on wet firn/ice columns.
+### 5.2 Adaptive Mode (current default)
 
-**Adaptive strategy** (default `water_transport = "adaptive"` in settings.toml):
+The `water_transport = "adaptive"` setting in `settings.toml` implements:
 
-1. First `stabilization_hours` (default 15 hours) always use BUCKET.
-2. Switch to RE after stabilisation.
-3. If RE reports `"Richards-Equation solver: no convergence"` (SafeMode or timeout):
+1. **Stabilisation phase** (first `stabilization_hours`, default 15 h): always BUCKET. This lets the initial profile equilibrate before RE is asked to handle potentially difficult states from the observed density profile.
+2. **Switch to RE** after stabilisation. Daemon is respawned with updated INI.
+3. **Convergence fallback**: if RE reports `"Richards-Equation solver: no convergence"`:
    - Switch to BUCKET immediately.
-   - Retry the same timestep with BUCKET (in case RE timed out).
-   - Use BUCKET for the next 24 model hours.
-   - Then automatically switch back to RE.
+   - If the step timed out (`ok=False`): retry the same timestep with BUCKET via daemon respawn.
+   - If the step completed in SafeMode (`ok=True`): continue; future steps use BUCKET.
+   - Use BUCKET for the next 24 model hours, then automatically switch back to RE.
 
-The `water_transport` setting lives in `settings.toml [run]` section and can be overridden by `--water-transport` CLI flag. It is also configurable from the app Settings tab.
+**Critical implementation detail**: The convergence check must run *before* `if not ok: raise RuntimeError`. When SNOWPACK times out, `ok=False`; if the check came after, the exception would fire before the BUCKET retry could happen.
 
-**CRITICAL implementation detail**: The convergence check must occur *before* the `if not ok: raise RuntimeError` guard. When SNOWPACK times out (300 s), `ok=False`; if the convergence check came after, the RuntimeError would fire before the BUCKET fallback could trigger.
+### 5.3 Setting History
 
-### 4.5 RE Warning Suppression
+| When | Change |
+|------|--------|
+| Initial | Hard-coded BUCKET throughout |
+| Later | Adaptive mode added: BUCKET stabilisation → RE switch → automatic fallback |
+| 2026-04-21 | `water_transport` added to `settings.toml [run]`; CLI `--water-transport` default changed to `None` (falls back to settings); selectbox added to app Settings tab |
 
-RE convergence failures generate verbose multi-line log blocks. These are suppressed in the GUI log viewer via `_LOG_FILTER` regex (in `app.py`) matching patterns like `"Richards-Equation solver"`, `"SafeMode was used"`, `"SAFE MODE"`, etc.
+The current setting in `settings.toml` is `water_transport = "adaptive"`.
 
-### 4.6 Temperature Assimilation
+### 5.4 Water-Transport Log
 
-Each hour the modelled temperature profile is nudged toward observed borehole temperatures:
+`output/water_transport_log.csv` — a dense per-step record (one row per completed hourly step) with columns `datetime,scheme`. Used for overlaying BUCKET vs RE periods on diagnostic plots.
 
-- Sensor depths are PROMICE-corrected (cumulative surface height change added to install depth).
-- **Above-surface sensors are included** as interpolation anchors (removed `actual_depth_m >= 0.0` filter in `update_sno_temperatures_from_moving_profile`). This improves near-surface nudging during the early deployment period before sensors are buried.
-- Observed temperatures are clipped to `[TEMP_MIN_C, 0.0°C]` before interpolation — above-surface sensors reading positive air temperatures are clamped to 0°C and cannot warm the firn above freezing.
-- Linear interpolation (`np.interp`) between sensors is used to estimate temperature at every model layer midpoint.
-- Only layers within the observed depth range (with 10 cm margin inward) are nudged.
-- Wet layers are only drained when observed T < `wet_layer_drain_threshold_c` (default −1.0°C).
+**How it is written** (event-based, not per-step):
+- During the run, only scheme *transitions* are appended to `output/water_transport_events.csv` (typically 2–5 rows per run). This file is rewritten on each transition so it survives crashes.
+- `_step_scheme` is captured immediately before `using_re` can be mutated by the convergence check, so SafeMode-completed RE steps are recorded correctly as RE even though the next 24 h will use BUCKET.
+- At run end or crash (in the `finally` block), events are expanded into the dense `water_transport_log.csv` by walking the event list.
 
----
+`read_water_transport_log(sid)` in `app.py` loads the dense CSV as a datetime-indexed DataFrame with a `scheme` column (deduplicates by keeping the last entry per timestamp).
 
-## 5. PRO File Format
-
-SNOWPACK `.pro` files are the main output. Key record codes:
-
-| Code | Quantity | Unit |
-|------|----------|------|
-| `0500` | Timestamp | `DD.MM.YYYY HH:MM:SS` |
-| `501` | Layer heights (top of each element from bottom) | cm |
-| `502` | Density | kg/m³ |
-| `503` | Temperature | °C |
-| `506` | Liquid water content (LWC) | % |
-| `513` | Grain type | integer code |
-| `515` | Ice volume fraction | — |
-
-Layers are in Lagrangian coordinates (heights change as snow settles/melts). The app and `compare_runs.py` both regrid to a fixed Eulerian depth grid (`_to_grid`) using step-function nearest-layer assignment.
-
-**Glacial ice artifact filter**: Dense basal ice layers (density ≥ 900 kg/m³ and `h > 0`) are excluded from the depth-profile plots to prevent them dominating the colour scale.
+Both diagnostic files are deleted on fresh start.
 
 ---
 
-## 6. Streamlit App (`app.py`)
+## 6. Temperature Assimilation
 
-Run with:
-```bash
-cd /home/yeti/Documents/autorun_snowpack
-streamlit run app.py
-```
+### 6.1 Algorithm
 
-### 6.1 Tabs
+Each hour, the modelled temperature profile is nudged toward observed borehole temperatures:
 
-| Tab | Contents |
-|-----|----------|
-| ▶ Run | Site selector, launch/stop controls, live log viewer |
-| ⚙ Settings | Edit and save `settings.toml` (all sections including forcing adjustments and water transport) |
-| 📊 Results | Per-site interactive plots (grain type, temperature, LWC, density) |
-| 🌡 Obs vs Model | Static observed vs modelled temperature figures for all completed runs |
+1. Sensor depths are PROMICE-corrected at each timestep: `actual_depth = install_depth + surface_height_change`.
+2. Observed temperatures are clipped to `[temp_min_c, temp_max_c]` (default `[−60, 0]°C`).
+3. Linear interpolation (`np.interp`) estimates target temperature at every model layer midpoint.
+4. Blending: `T_new = (1 − alpha) × T_model + alpha × T_obs` for layers within the observed depth range.
+5. The maximum temperature change per step is capped at `max_adjust_per_hour_c × n_hours`.
+6. Wet layers are only drained when observed T < `wet_layer_drain_threshold_c` (default −1.0°C).
 
-### 6.2 Obs vs Model Tab
+**Above-surface sensors are included** as interpolation anchors. Sensors still above the snowpack surface report air temperature, which is clamped to 0°C before interpolation. This improves near-surface nudging during the early deployment period. (The original code excluded sensors with `actual_depth_m < 0`.)
 
-Site radio selector with options: T2 (2007), T2 bucket (2007), T2− (2019), T3 (1794 m), T4 (1873 m), CP (1998 m), UP18 (2109 m).
+### 6.2 SETTEMPS Fast Path
 
-- "Regenerate this site" button runs `plot_obs_vs_model.py <key>`.
-- "Regenerate all sites" button runs `plot_obs_vs_model.py` (no args).
-- Output PNGs are stored in the project root (e.g. `T4_obs_vs_model.png`, `CP_obs_vs_model.png`).
+When the daemon is active and no volume-fraction changes are needed (no wet-layer draining, within `SETTEMPS_SNO_WRITE_INTERVAL = 24` steps since last SNO write), temperature adjustments are injected directly into the daemon's in-memory state via the `SETTEMPS` command rather than writing a `.sno` file and issuing `RELOAD_SNO`. This bypasses the ~50–100 ms SNO file round-trip per step. Falls back to full SNO write + `RELOAD_SNO` when wet draining occurs or the interval expires (for crash recovery).
 
-### 6.3 Results Tab — Plot Selector
+### 6.3 Parameter History
 
-Four checkboxes (none checked by default). Checking a box loads and renders the corresponding data:
+| Parameter | Original | Current | When changed |
+|-----------|----------|---------|--------------|
+| `alpha` | 0.1 (hard-coded) | 0.1 (settings.toml) | Moved to settings |
+| `max_adjust_per_hour_c` | 0.1°C (hard-coded) | **1.0°C** (settings.toml) | Moved to settings 2026-04-21; user changed value via app |
+| `temp_min_c` | −60°C (hard-coded) | −60°C (settings.toml) | Moved to settings |
+| `temp_max_c` | 0°C (hard-coded) | 0°C (settings.toml) | Moved to settings |
+| Above-surface sensors | Excluded (`depth >= 0` filter) | **Included** (clamped to 0°C) | Changed 2026-04-21 |
+| `assimilation_interval_h` | 1 (hard-coded) | 1 (settings.toml) | Added 2026-04-22; scales max_adjust cap proportionally |
 
-| Checkbox | Plots shown |
-|----------|-------------|
-| Grain type | Grain type hover heatmap (HTML iframe, JS-rendered) |
-| Temperature | Modelled temperature heatmap + optional observed T overlay |
-| LWC & Refreezing | Liquid water content heatmap + cumulative refreezing line |
-| Density | Density heatmap (HTML iframe, JS-rendered) |
-
-### 6.4 Temperature Heatmap
-
-- Colourmap: Turbo, capped at 0°C (`vmax=0`).
-- White isotherm line drawn at exactly **−0.2°C** (not zero) using a Plotly Contour trace with `contours=dict(start=-0.2, end=-0.1, size=1)`.
-- Observed temperature shown as an overplotted line series (one trace per sensor depth).
-- Both modelled and observed use the same shared `coloraxis` for consistent scaling.
-
-### 6.5 Cumulative Refreezing
-
-Calculated in `load_pro` from simultaneous ice fraction increase + LWC decrease:
-
-```python
-d_ice = np.diff(ice_col)         # ice volume fraction change
-d_lwc = np.diff(lwc_col)         # LWC change
-refreezing_per_step = np.minimum(
-    np.where(d_ice > 0, d_ice, 0.0),   # ice increasing
-    np.where(d_lwc < 0, -d_lwc, 0.0),  # LWC decreasing
-)
-cumul_refreezing = np.concatenate([[0.0], np.cumsum(refreezing_per_step)])
-```
-
-**Design decision**: Refreezing below ~4 cm depth is considered permanent (ice at depth never re-melts in these firn columns). Therefore **no credit system** — simple cumulative sum is correct. Any refreezing event at any depth counts permanently.
-
-### 6.6 X-axis Synchronisation
-
-All Plotly subplots use `make_subplots(shared_xaxes=True)` so zoom/pan on any panel syncs all others.
-
-### 6.7 Caching
-
-`@st.cache_data` with a `_mtime` parameter (file modification timestamp) busts the cache when the `.pro` file changes during a live run.
-
-### 6.8 PID Tracking
-
-The app reads `{site_dir}/.autorun.pid` to determine if a run is active. Runs launched from the GUI write this file automatically. Runs launched from the terminal do **not** — you must write it manually:
-
-```bash
-echo <PID> > /home/yeti/Documents/autorun_snowpack/2022_T3_25m/.autorun.pid
-```
+All assimilation parameters are editable in the app's ⚙ Settings tab under "Model & assimilation".
 
 ---
 
-## 7. Comparison Tool (`compare_runs.py`)
+## 7. Snow/Firn Profile Management (`.sno` Files)
 
-Produces a 2×3 matplotlib PNG comparing two runs:
+### 7.1 Initial Profile Build
 
-```
-[T_A]   [T_B]   [ΔT = B−A]
-[LWC_A] [LWC_B] [ΔLWC = B−A]
-```
+From observed borehole density and temperature data:
+- Layer thickness, temperature, ice volume fraction, and void fraction are computed.
+- Grain microstructure defaults (rg, rb, dd, sp, mk) are set from `settings.toml [snow_defaults]`.
+- Basal layers are appended with temperature estimated by extrapolating the gradient of the deepest 5 m of the observed profile to 15 m below the lowest thermistor (prevents unconstrained basal drift). Mode and parameters in `settings.toml [basal]`.
 
-Usage:
-```bash
-python compare_runs.py \
-    --site-a 2007_T2_10m   --label-a "Adaptive (RE+BUCKET)" \
-    --site-b 2007_T2_10m_bucket --label-b "BUCKET only"
-```
+### 7.2 Ice Volume Fraction Cap (`max_vol_frac_ice`)
 
-Output: `2007_T2_10m_vs_2007_T2_10m_bucket_comparison.png` in the project root.
+**Problem**: SNOWPACK's compaction physics can drive `θ_i → 1.0` exactly in ice lenses. When `θ_i = 1.0`, porosity = 0, which makes the RE van Genuchten retention curve and hydraulic conductivity `K(θ)` degenerate. The RE Newton solver enters an infinite retry loop emitting `"set surfacefluxrate from 0 to 0"` without advancing. This caused the 2022_T3_25m crash (9 layers with `θ_i = 1.0`, 18,000 warnings, 900 s daemon timeout).
 
-**Grid alignment**: both runs are interpolated onto the intersection of their time ranges (hourly, nearest-neighbour) and the shallower of their two depth maxima (linear depth interpolation).
+**Fix**: `max_vol_frac_ice` (default 0.98, range 0.90–0.99, in `settings.toml [physics]`, editable in app). Applied at every SNO write:
 
----
+- **Restart-file paths** (all paths through `rewrite_sno_profiledate_and_clip_timestamps`): when `θ_i > MAX_VOL_FRAC_ICE`, `Layer_Thick` is scaled by `θ_i_old / θ_i_new` so that ice mass per unit area (`ρ_i × θ_i × thick`) and sensible heat per unit area (`ρ_i × c_i × T × θ_i × thick`) are both conserved. The air pore `θ_v` absorbs the freed volume. `HS_Last` in the header is updated to reflect the slightly taller column (~1.2 cm for the T3 profile).
+- **Initial profile build** (`write_sno_file`): simple cap only — measurement precision at ρ ≈ 917 kg/m³ cannot distinguish 898 from 917, so the 2% correction is within instrument error and no thickness compensation is applied.
 
-## 8. Plot Conventions
+Conservation properties (restart paths): mass ✓, sensible heat ✓, latent heat budget ✓ (ice mass preserved).
 
-- All SNOWPACK output plots use **depth from surface** on the y-axis: surface = 0 at top, depth increasing downward. The PRO file code 501 gives element-top heights in cm above the base — always convert: `depth_m = (surface_height_cm - element_height_cm) / 100.0`.
-- **Isotherm**: all static figures draw a white contour at **−0.05°C**. The colorbar gray cutoff is also −0.05°C (values above are shown gray).
-- Colorscale: discrete turbo, 2°C bins from −20°C to −0.05°C, gray above.
-- Sensor depth lines (black, α=0.4, linewidth=0.5) on observed panels track PROMICE-corrected depth over time.
+At 0.98, effective ice-layer density ≈ 898 kg/m³ vs 917 kg/m³ — a residual 2% air pore that keeps RE well-posed.
 
 ---
 
-## 9. ERA5 Forcing and SMET File
+## 8. ERA5 Forcing and SMET File
 
-### 9.1 Variables Used
+### 8.1 Variables Used
 
 | ERA5 field | SMET field | Conversion |
 |-----------|-----------|------------|
-| `t2m` (K) | `TA` (°C stored) | −273.15; SMET units_offset adds 273.15 back |
+| `t2m` (K) | `TA` (°C stored) | −273.15; SMET `units_offset` adds 273.15 back for SNOWPACK |
 | `d2m` + `t2m` | `RH` (fraction) | Magnus formula |
 | `u10`, `v10` | `VW`, `DW` | vector magnitude/direction |
 | `ssrd` (J m⁻²) | `ISWR` (W m⁻²) | ÷3600 |
 | `strd` (J m⁻²) | `ILWR` (W m⁻²) | ÷3600 |
 | `tp` (m) | `PSUM` (mm) | incremental diff ×1000 |
 
-### 9.2 Forcing Adjustments
+### 8.2 Altitude
 
-Per-variable multiplicative and additive adjustments are stored in `settings.toml [forcing_adjustments]` and applied via the SMET header:
+Derived from ERA5 surface geopotential (`z`, m²/s²) at the nearest grid point: `altitude_m = z / 9.80665`. The geopotential file is downloaded once per site and cached in `{site_dir}/cache/`. Falls back to `meta.elevation` from the temperature CSV header if the cache is unavailable.
+
+Previously: always used the elevation from the CSV header. Changed 2026-04-21.
+
+### 8.3 Forcing Adjustments
+
+Per-variable multiplicative and additive adjustments are stored in `settings.toml [forcing_adjustments]` and applied via the SMET header (`units_multiplier`, `units_offset`):
 
 ```
-physical = stored_ERA5_value * multiplier + offset
+physical = stored_ERA5_value × multiplier + offset
 ```
 
-For `TA`, the base offset of 273.15 (°C→K for SNOWPACK) is combined with the user additive: `smet_offset = 273.15 + ta_offset`. All other fields have base offset = 0.
+For `TA`, the base offset of 273.15 (°C → K) is combined with the user additive: `smet_offset = 273.15 + ta_offset`. All other fields have base offset = 0.
 
-**Old hardcoded factor removed**: precipitation was previously multiplied by 1.5 in Python before writing to SMET. This is now gone — use `psum_multiplier = 1.5` in `[forcing_adjustments]` instead (currently set to 1.5 to preserve the original behaviour).
-
-### 9.3 Altitude
-
-The SMET `altitude` field is derived from the ERA5 surface geopotential (`z` variable, m²/s²) at the nearest grid point: `altitude_m = z / 9.80665`. Falls back to `meta.elevation` from the temperature CSV header if the geopotential file is unavailable.
+**History**: Precipitation was originally multiplied by 1.5 as a hard-coded factor in Python before writing to SMET. This was removed in 2026-04-21 and replaced with `psum_multiplier = 1.5` in `[forcing_adjustments]` (currently set to 1.5 to preserve prior behaviour). All forcing adjustments are now editable from the app Settings tab under "ERA5 forcing adjustments".
 
 ---
 
-## 10. Configuration Reference (`settings.toml`)
+## 9. Performance: Daemon, RAM Disk, Chunking
 
-Key sections and their purpose:
+### 9.1 SNOWPACK Daemon
 
-- `[paths]` — SNOWPACK binary path; data root (auto-detected if blank).
-- `[run]` — `run_until` date, archiving options, `water_transport` scheme (`adaptive`/`BUCKET`/`RICHARDSEQUATION`).
-- `[model]` — timestep (15 min), sensor height, assimilation `alpha` (0.1).
-- `[physics]` — ice/water density, temperature tolerances.
-- `[assimilation]` — T bounds, max hourly nudge, wet-layer drain threshold.
-- `[basal]` — bottom boundary T estimation (`profile_gradient` mode, looks back 5 m, targets 15 m offset).
-- `[era5]` — CDS API dataset names.
-- `[forcing_adjustments]` — per-variable multiplier and offset for TA, RH, VW, ISWR, ILWR, PSUM. Applied via SMET header; no Python-side scaling.
+**Problem** (original): Each assimilation step spawned a new SNOWPACK process. The dominant startup cost was MeteoIO re-reading and pre-buffering the SMET forcing file — O(record_length) per step.
 
-All editable from the app's ⚙ Settings tab.
+**Solution**: Modified `snowpack/Main.cc` to support `--daemon` mode. In daemon mode, SNOWPACK initialises once (reads SNO, pre-buffers SMET) then enters a command loop on stdin:
 
----
+| Command | Action |
+|---------|--------|
+| `RUN YYYY-MM-DDTHH:MM` | Advance simulation to that date, write SNO checkpoint, print `CHECKPOINT <date>`, wait |
+| `RELOAD_SNO` | Re-read the Python-modified `.sno` from disk into memory; IOManager buffer stays warm |
+| `SETTEMPS i0:T0,i1:T1,...` | Apply temperature adjustments directly to in-memory `Edata[i].Te`; print `READY` |
+| `QUIT` | Write final SNO and exit |
 
-## 11. Key Algorithms Summary
+The Hazard object is reinitialised per chunk; IOManager, vecXdata, and SunObject persist.
 
-### Temperature Assimilation
-Each hour, the modelled temperature profile is nudged toward observed borehole temperatures using `alpha=0.1` (10% blend per hour). Limits: max 1.0°C adjustment per hour (changed from 0.1); observed T clamped to [−60, 0]°C. Above-surface sensors included as interpolation anchors (clamped to 0°C).
+`SnowpackDaemon` Python class manages the subprocess (spawn, wait_for_checkpoint, reload_and_run, settemps_and_run, respawn, quit). Daemon stdout is the pipe channel; stderr is drained by a background thread and printed to console.
 
-### Moving Sensor Depth
-As firn settles, the physical depth of each thermistor changes. PROMICE cumulative surface height change is added to nominal install depth at each timestep.
+Daemon respawn (one cold start per scheme switch, ~1 s) is used for: BUCKET → RE switch, RE → BUCKET fallback, .pro chunk rotation. Enabled by default: `use_daemon = true` in `settings.toml`.
 
-### Basal Temperature
-Estimated by extrapolating the gradient of the deepest 5 m of the observed profile to 15 m below the lowest thermistor. Prevents unconstrained drift in the basal layers.
+### 9.2 RAM Disk
 
-### Refreezing Quantification
-See §6.5. Uses simultaneous increase in ice volume fraction and decrease in LWC at the same layer and timestep. Simple cumulative sum — no credit system.
+`use_ramdisk = true` in `settings.toml`. `_setup_ramdisk()` creates `/dev/shm/snowpack_{sid}/` and copies hot working files (SNO, cfgfiles, current_snow) there. Large sequential-write outputs (output/, era_tmp/, cache/) stay on disk via symlinks. After each assimilation step where the SNO was written, it is synced back to disk (not done when SETTEMPS was used, since SNO was not written that step).
 
----
+### 9.3 .pro File Chunking
 
-## 12. Workflow for a New Site
+`pro_chunk_hours = 720` in `settings.toml [run]` (default 720 model hours = 30 days; 0 = disabled).
 
-1. Place temperature CSV in `AllCoreDataCommonFormat/` following the existing naming convention.
-2. Run:
-   ```bash
-   cd /home/yeti/Documents/autorun_snowpack
-   python autorun_snowpack.py --site SITE --year YEAR --depth DEPTH
-   ```
-3. Monitor via `{site_dir}/autorun.log` or the Streamlit app.
-4. If the run exits early, check the log for SNOWPACK errors; the adaptive fallback handles most RE convergence issues automatically.
-5. To resume: just re-run the same command — resume detection reads `ProfileDate` from the existing `.sno` file.
+**Why**: For multi-year runs the `.pro` file grows to hundreds of MB. Chunking keeps individual files manageable and allows earlier chunks to be analysed while the run continues.
+
+**Mechanism**: Every `pro_chunk_hours` model steps, the current `.pro` is moved to `output/chunks/chunk_NNNN.pro` and the daemon is respawned so SNOWPACK writes to a fresh `.pro`. At run end (or crash), `concatenate_pro_chunks()` merges all chunks + current `.pro` into the final `.pro` by taking the header from chunk 0 and appending data records from all sources. Non-daemon mode rotates the file before calling `run_snowpack_one_step`. Chunks and diagnostic files are cleared on fresh start.
+
+### 9.4 ETA Progress Bar
+
+`output/run_status.json` is written at each completed step with `run_start_model`, `run_start_wall`, `step_model`, `step_wall`. The app reads this, computes the current model-time-per-wall-second rate, and appends `· ETA X.X h / N min / <2 min` to the progress bar label. Only shown while running; rate resets on each resume (reflects the current session's speed, not cumulative since the original run start).
 
 ---
 
-## 13. Common Pitfalls
+## 10. Output Files
+
+### 10.1 PRO File Format
+
+SNOWPACK `.pro` files are the main output. Header contains field definitions; data records follow with one block per timestep.
+
+Key record codes:
+
+| Code | Quantity | Unit |
+|------|----------|------|
+| `0500` | Timestamp | `DD.MM.YYYY HH:MM:SS` |
+| `0501` | Layer heights (top of each element from bottom) | cm |
+| `0502` | Density | kg/m³ |
+| `0503` | Temperature | °C |
+| `0506` | Liquid water content (LWC) | % |
+| `0513` | Grain type | integer code |
+| `0515` | Ice volume fraction | — |
+| `0516` | Air volume fraction | — |
+
+Layers are in Lagrangian coordinates (heights change as snow settles/melts). The app and `compare_runs.py` regrid to a fixed Eulerian depth grid (`_to_grid`) using nearest-layer assignment.
+
+**Glacial ice artifact filter**: Dense basal ice layers (density ≥ 900 kg/m³ and `h > 0`) are excluded from depth-profile plots to prevent them dominating the colour scale.
+
+### 10.2 Per-Run Diagnostic Files
+
+All written to `output/`; cleared on fresh start.
+
+| File | Written | Content |
+|------|---------|---------|
+| `run_status.json` | Each step | `run_start_model`, `run_start_wall`, `step_model`, `step_wall` — used by app to compute ETA |
+| `water_transport_events.csv` | On scheme transitions only | Sparse: `datetime,scheme` rows at transition points; survives crash |
+| `water_transport_log.csv` | At run end / crash | Dense: one `datetime,scheme` row per completed hourly step; expanded from events |
+
+---
+
+## 11. Streamlit App (`app.py`)
+
+```bash
+cd /home/yeti/Documents/autorun_snowpack
+streamlit run app.py
+```
+
+### 11.1 Tabs
+
+| Tab | Contents |
+|-----|----------|
+| ▶ Run | Site selector, launch/stop controls, progress bar with ETA, status |
+| ⚙ Settings | Edit and save `settings.toml` |
+| 📊 Results | Per-site interactive plots (grain type, temperature, LWC, density) |
+| 🌡 Obs vs Model | Static observed vs modelled temperature figures |
+
+### 11.2 Run Tab
+
+- **Site selector**: four radio buttons (Not yet run / Completed / Incomplete / In progress), each with count. Selecting a group shows a dropdown of matching sites.
+- **Progress bar**: `{current_date} / {end_date}  ({N}%)  · ETA X.X h`. Stale `.pro` data is suppressed for fresh launches until the subprocess has written new output.
+- **Crash log**: shown when status is "Crashed / stopped", but suppressed immediately after a new launch is triggered (prevents the old crash log from flashing during startup lag). Uses `fresh_launch_times` session-state key.
+- **`is_running`**: checks `.autorun.pid` file, then `/proc/*/cwd` fallback (detects terminal-launched runs without a PID file).
+
+### 11.3 Settings Tab
+
+Five accordion sections: Paths, Run, Model & assimilation, Basal boundary, ERA5 forcing adjustments. All settings in `settings.toml` are editable here. Notable controls:
+
+- **Water transport** selectbox: `adaptive` / `BUCKET` / `RICHARDSEQUATION`
+- **RE stabilisation (hours)**: BUCKET phase duration in adaptive mode
+- **.pro chunk size**: model hours per chunk (0 = off)
+- **Max ice vol. fraction**: 0.90–0.99, controls `max_vol_frac_ice` RE convergence fix
+- **ERA5 forcing adjustments**: per-variable multiplier and offset grid (applied via SMET header)
+
+### 11.4 Results Tab
+
+Four checkboxes (none checked by default):
+
+| Checkbox | Plots |
+|----------|-------|
+| Grain type | Grain type hover heatmap (HTML iframe, JS-rendered) |
+| Temperature | Modelled temperature heatmap + optional observed T overlay |
+| LWC & Refreezing | LWC heatmap (log scale) + cumulative refreezing line |
+| Density | Density heatmap (HTML iframe, JS-rendered) |
+
+**Temperature heatmap**: Turbo colourmap, capped at 0°C. White isotherm at **−0.2°C** via Plotly Contour trace. Observed T overlaid as line series per sensor depth. Both modelled and observed share the same `coloraxis`.
+
+**LWC plot**: Data pre-transformed with `np.log10(np.clip(..., _LWC_FLOOR, None))`; `customdata` carries raw values for hover. Explicit tick labels at 0.01, 0.1, 1, 5, ≥10 kg m⁻².
+
+**Cumulative refreezing** (from `load_pro`):
+```python
+d_ice = np.diff(ice_col)          # ice volume fraction change
+d_lwc = np.diff(lwc_col)          # LWC change
+refreezing = np.minimum(
+    np.where(d_ice > 0, d_ice, 0.0),    # ice increasing
+    np.where(d_lwc < 0, -d_lwc, 0.0),   # LWC decreasing
+)
+cumul = np.concatenate([[0.0], np.cumsum(refreezing)])
+```
+No credit system — refreezing at depth is permanent in these firn columns, so simple cumulative sum is correct.
+
+**Caching**: `@st.cache_data` with `_mtime` parameter (file modification timestamp) busts the cache when the `.pro` file changes during a live run.
+
+**X-axis sync**: `make_subplots(shared_xaxes=True)` — zoom/pan on any panel syncs all others.
+
+### 11.5 Obs vs Model Tab
+
+Sites: T2 (2007), T2 bucket (2007), T2− (2019), T3, T4, CP, UP18, plus any additional completed runs auto-discovered by `sites_with_results()`.
+
+- "Regenerate this site" expander: start date, end date, max depth (default 10 m) → runs `plot_obs_vs_model.py` subprocess.
+- "Regenerate all sites" button runs `plot_obs_vs_model.py` (no args).
+- Auto-regeneration runs at end of each `main()` call.
+
+---
+
+## 12. SNOWPACK Source Patches
+
+The stock SNOWPACK binary is patched in two files. Both are tracked in `snowpack/` in this repo. Rebuild with `snowpack/build_snowpack.sh` (copies patched files into the source tree before `cmake`).
+
+### 12.1 `snowpack/Main.cc` — Daemon Mode + SETTEMPS
+
+Added `--daemon` flag support (see §9.1). Key changes:
+- `--daemon` argument parsing.
+- Command loop replacing the normal run-once execution.
+- `SETTEMPS` branch: parses `i:T` pairs, bounds-checks against `Xdata.getNumberOfElements()`, sets `Edata[i].Te`.
+- Hazard reinitialised per `RUN` command (duration can change); IOManager and vecXdata persist.
+
+### 12.2 `snowpack/vanGenuchten.cc` — Density-Dependent Residual Saturation (θᵣ)
+
+**History**: The stock SNOWPACK RE implementation hard-coded `θᵣ = 0.02` (2% residual water content) for all snow/firn regardless of density. SNOWPACK's BUCKET scheme already used the full Coléou & Lesaffre (1998) formula `θᵣ = f(θ_ice, ρ)`. This inconsistency meant RE and BUCKET made different physical assumptions about how much water could remain immobile.
+
+**Change**: Modified `SetVGParamsSnow()` to replace the hard-coded `0.02` cap with `ElementData::snowResidualWaterContent(EMS->theta[ICE])` — the same formula BUCKET uses. Added `#include <snowpack/DataClasses.h>`.
+
+**Effect by density (from T2minus comparison run)**:
+- Low-density firn (300–400 kg/m³): θᵣ ≈ 0.05–0.08 (was 0.02 — 3–4× increase)
+- Typical firn (most of the column): θᵣ ≈ 0.028–0.042 (~1.5× the old fixed value)
+- Near-ice (>850 kg/m³): θᵣ approaches 0 (pore-space constraint dominates)
+
+**LWC impact**: Comparison of fixed vs dynamic θᵣ on T2minus (365,619 layer-timesteps, Pearson r = +0.42 with density):
+- Low-density firn (300–750 kg/m³): dynamic run has *less* LWC (−0.07 to −0.15). Higher θᵣ reclassifies mobile water as immobile residual, reducing percolation.
+- Dense firn/ice (750–917 kg/m³): dynamic run has *more* LWC (+0.07 to +0.11).
+
+---
+
+## 13. Plot Conventions
+
+- **Depth axis**: always depth from surface (0 at top, increasing downward). PRO code 0501 gives element-top heights in cm above the base — convert: `depth_m = (surface_height_cm − element_height_cm) / 100.0`. Never plot height-above-base as y-axis.
+- **Isotherm**: all static figures draw a white contour at **−0.05°C**; colorbar gray cutoff also at −0.05°C.
+- **Colorscale**: discrete Turbo, 2°C bins from −20°C to −0.05°C, gray above.
+- **Sensor depth lines**: black, α=0.4, linewidth=0.5, on observed panels; track PROMICE-corrected depth over time.
+
+---
+
+## 14. Configuration Reference (`settings.toml`)
+
+```toml
+[paths]
+snowpack_exe   # Path to SNOWPACK binary
+data_root      # Root for AllCoreDataCommonFormat/ (blank = auto-detect)
+
+[run]
+run_until              # Stop early ("YYYY-MM-DD HH:MM" or "")
+keep_hourly_archives   # Save per-step raw/adjusted .sno pairs
+keep_last_n_sno        # Rolling SNO checkpoint count (default 3)
+water_transport        # "adaptive" | "BUCKET" | "RICHARDSEQUATION"
+stabilization_hours    # BUCKET phase length before RE switch (default 15)
+assimilation_interval_h  # Hours per simulation cycle (default 1)
+use_ramdisk            # Run hot files from /dev/shm (default true)
+use_daemon             # Keep SNOWPACK alive between steps (default true)
+pro_chunk_hours        # .pro chunk size in model hours; 0 = off (default 720)
+
+[model]
+calculation_step_length_min  # SNOWPACK internal timestep (default 15 min)
+height_of_meteo_values       # Sensor height (default 1 m)
+height_of_wind_value         # Wind sensor height (default 1 m)
+alpha                        # Assimilation blend coefficient (default 0.1)
+default_elevation_m          # Fallback if geopotential unavailable
+
+[physics]
+ice_density              # kg/m³ (default 917)
+water_density            # kg/m³ (default 1000)
+max_vol_frac_ice         # RE convergence cap: 0.90–0.99 (default 0.98)
+default_water_frac_at_zero  # Initial liquid fraction at 0°C
+zero_temp_tol            # Numerical tolerance for melting-point check
+
+[assimilation]
+temp_min_c               # Lower clamp for observed T (default −60°C)
+temp_max_c               # Upper clamp for observed T (default 0°C)
+max_adjust_per_hour_c    # Max nudge per hour (default 1.0°C; was 0.1°C)
+min_obs_for_adjust       # Minimum sensors needed to nudge (default 3)
+wet_layer_drain_threshold_c  # Only drain wet layers when obs T < this (default −1°C)
+
+[snow_defaults]          # Microstructure values for new SNO layers (rg, rb, dd, sp, etc.)
+
+[basal]
+tsg_mode                 # "profile_gradient" | "zero" | "soil_temp"
+tsg_lookback_m           # Depth range for gradient fit (default 5 m)
+tsg_target_offset_m      # Extrapolation depth below deepest sensor (default 15 m)
+basal_temp_min_c         # Floor for basal T estimate (default −40°C)
+
+[era5]                   # CDS API dataset names
+
+[forcing_adjustments]    # Per-variable multiplier and offset for TA, RH, VW, ISWR, ILWR, PSUM
+                         # Applied via SMET header; psum_multiplier currently 1.5
+```
+
+---
+
+## 15. Comparison Tool (`compare_runs.py`)
+
+Produces a 2×3 matplotlib PNG comparing two `.pro` files:
+
+```
+[T_A]   [T_B]   [ΔT = B−A]
+[LWC_A] [LWC_B] [ΔLWC = B−A]
+```
+
+```bash
+python compare_runs.py \
+    --site-a 2007_T2_10m   --label-a "Adaptive (RE+BUCKET)" \
+    --site-b 2007_T2_10m_bucket --label-b "BUCKET only"
+```
+
+**Grid alignment**: both runs are interpolated onto the intersection of their time ranges (hourly, nearest-neighbour) and the shallower of their two depth maxima (linear depth interpolation).
+
+---
+
+## 16. Common Pitfalls
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
 | Doubled site ID `2022_2022_T3_25m_25m` | `--site 2022_T3_25m` instead of `--site T3 --year 2022 --depth 25` | Always pass components separately |
-| App shows "Crashed/stopped" for a terminal run | No `.autorun.pid` file | `echo <PID> > {site_dir}/.autorun.pid` |
-| RE never triggers fallback | Convergence check placed after `if not ok: raise RuntimeError` | Check must come before the ok-guard |
-| Resume point overwritten | `write_sno_file` runs before loop reads ProfileDate | Snapshot bytes before write, restore after setup |
-| RE warning spam in log | RE SafeMode is very verbose | `_LOG_FILTER` regex in `app.py` suppresses it |
-| CP obs vs model fails to load | Trailing comma in `.pro` file produces empty string | `float(v) for v in parts if v.strip()` guard in parse_pro |
+| App shows "Not started" for a terminal run | No `.autorun.pid` file | `echo <PID> > {site_dir}/.autorun.pid` |
+| RE never triggers fallback (crash instead) | Convergence check placed after `if not ok: raise RuntimeError` | Check must come before the ok-guard |
+| Resume point overwritten on restart | Old code ran `write_sno_file` before reading ProfileDate | Now: checkpoint detection runs before any SNO build |
+| RE warning spam in log | RE SafeMode is very verbose | `_LOG_FILTER` regex in `app.py` suppresses it in the UI |
+| CP obs vs model parse error | Trailing comma in `.pro` produces empty string token | `float(v) for v in parts if v.strip()` guard in parse_pro |
+| run_status.json missing / ETA not showing | Model process started before ETA code was committed | Restart the run; ETA only works with code from 2026-04-24 onward |
 
 ---
 
-## Update — 2026-04-21
+## 17. Active Research: T2minus Comparison Runs
 
-### Temperature Assimilation — Above-Surface Sensors
-- Removed `actual_depth_m >= 0.0` filter in `update_sno_temperatures_from_moving_profile`. Above-surface sensors now included as interpolation anchors. Observed values clamped to 0°C before interpolation, so air temperatures cannot warm firn above freezing. This improves near-surface nudging early in each deployment.
+Two adaptive RE runs exist side-by-side for 2019_T2minus_32m:
 
-### ERA5 Forcing — Configurable Adjustments
-- Removed hardcoded `*1.5` precipitation factor from Python code.
-- Added `[forcing_adjustments]` section to `settings.toml` with per-variable `{ta,rh,vw,iswr,ilwr,psum}_{multiplier,offset}`. Applied via SMET `units_offset` / `units_multiplier` header — no Python-side scaling. Precipitation multiplier currently set to 1.5 in settings to preserve prior behaviour.
-- ERA5 geopotential altitude (`z / 9.80665`) now used as SMET `altitude` instead of site elevation from CSV header. Falls back to site elevation if geopotential unavailable.
+| Run | .pro file | θᵣ |
+|-----|-----------|-----|
+| Fixed θᵣ (baseline) | `output/2019-T2minus-32m_TEMP_ASSIM_RUN_RE_fixed_theta_r.pro` | 0.02 hard-coded |
+| Dynamic θᵣ (current) | `output/2019-T2minus-32m_TEMP_ASSIM_RUN.pro` | Coléou formula |
 
-### Water Transport — Settings-Configurable
-- Added `water_transport` to `settings.toml [run]` (default `"adaptive"`).
-- CLI `--water-transport` default changed to `None`; settings.toml value used when flag absent.
-- Selectbox added to app Settings tab.
-- Current setting: `BUCKET` (user changed from `adaptive`).
+Checkpoint backups: `current_snow_backup_fixed_theta_r/`, `input/initial_profile_checkpoint_backup.sno`.
 
-### Obs vs Model Figures
-- `plot_obs_vs_model.py`: single script generates 2-panel (observed top, modelled bottom) figures for all 6 completed sites. Time range auto-detected from data overlap. Sites: T2 (2007), T2 bucket (2007), T2− (2019), T3, T4, CP, UP18.
-- T4 and UP18 individual scripts updated to 2-panel layout (removed raw-sensor bottom panel).
-- App: consolidated two individual obs vs model tabs into single "🌡 Obs vs Model" tab with radio site selector and Regenerate buttons.
+**θᵣ range in dynamic run** (from ice volume fraction field 515):
+- Overall range: 0.000–0.080 (0.08 cap never reached; zero occurs where pore-space cap dominates, θᵢ > 0.971)
+- Median: 0.029, mean: 0.029
+- 92.5% of all layer-timesteps have θᵣ > 0.02 — the old fixed cap was binding nearly everywhere
 
-### Isotherm and Colorbar Update
-- All temperature figures (observed multi-site and obs vs model) updated from −0.1°C to **−0.05°C** isotherm and gray colorbar cutoff.
+**LWC difference analysis** (365,619 valid pixels, Pearson r = +0.42 with density):
+- Blue (dynamic < fixed) concentrated in low-density firn (300–750 kg/m³)
+- Red (dynamic > fixed) in near-ice layers (750–917 kg/m³)
 
-### compare_runs.py Fixes (earlier session)
-- `_parse_pro`: skip `"Date"` header line in `0500` records; wrap `int(parts[1])` in try/except for `nElems` header.
-- `_to_grid`: fixed to use depth-from-surface (`surface - height`) instead of height-from-base as depth.
+**Working hypothesis**: Higher θᵣ in low-density firn reclassifies mobile water as immobile residual, reducing percolation; water that pooled in low-density layers in the fixed run is redistributed or drains faster in the dynamic run. Mechanism not fully resolved.
 
-### max_adjust_per_hour_c
-- Increased from 0.1°C to 1.0°C in settings (user changed via app).
+### Comparison Scripts
 
----
-
-## Update — 2026-04-22 (Performance: assimilation interval, RAM disk, run status UI)
-
-### assimilation_interval_h
-- Added `assimilation_interval_h` to `settings.toml [run]` (default 1). Controls how many hours SNOWPACK runs per cycle. The assimilation temperature cap scales proportionally: `max_delta = MAX_ADJUST_PER_HOUR_C * n_hours`.
-- `cycle_hourly_snowpack_with_moving_profile` now accepts `assimilation_interval_h` and steps the loop in chunks of that many hours.
-- Exposed in app Settings tab.
-
-### RAM disk (`use_ramdisk`)
-- Added `use_ramdisk = true` to `settings.toml [run]`.
-- `_setup_ramdisk(site_id, disk_project_dir)` creates `/dev/shm/snowpack_{site_id}/`, copies hot files (SNO, cfgfiles, current_snow) there, symlinks output/era_tmp/cache to disk.
-- `configure()` redirects PROJECT_DIR / INPUT_DIR / CFG_DIR / CURRENT_SNOW_DIR to RAM paths when enabled. `DISK_INPUT_DIR` retains the real disk path for checkpoint syncs.
-- After each assimilation step, modified SNO is synced back to disk.
-
-### Run tab — core status UI
-- `_core_status(y, s, d)` classifies each core as `fresh / complete / incomplete / running`.
-- Four radio buttons always shown with counts: "Not yet run (N)", "Completed (N)", "Incomplete / crashed (N)", "In progress (N)".
-- `get_pro_current_time` reads last 2 MB of .pro file (previously 3 KB, too small for ~125 KB/timestep blocks).
-- `_temp_date_range` fixed to skip non-date rows (previously skipped first 4 rows but CSVs have 5 header rows, causing `pd.to_datetime("timestamp")` error → all cores falsely "fresh").
-- `get_expected_date_range`: removed `@st.cache_data` to prevent stale (None, None) poisoning.
-- `is_running`: added `/proc/*/cwd` fallback to detect runs launched from terminal (no PID file).
-
-### SNOWPACK timeout
-- Raised from 300 s to 900 s in `run_snowpack_one_step` (2022 T3 summer melt steps took up to 141 s).
-
-### Settings tab reorganisation
-- Settings tab uses 5 `st.expander` accordion sections: Paths, Run, Model & assimilation, Basal boundary, ERA5 forcing adjustments.
-
----
-
-## Update — 2026-04-23 (Persistent SNOWPACK daemon)
-
-### Problem
-Each assimilation step spawned a fresh SNOWPACK process. The dominant startup cost was MeteoIO re-reading and pre-buffering the SMET forcing file on every respawn — O(record_length) per hour of simulation.
-
-### Design
-- Modified `SNOWPACK/applications/snowpack/Main.cc` to support `--daemon` mode.
-- In daemon mode, SNOWPACK initialises once (reads SNO, pre-buffers SMET), then enters a command loop on stdin:
-  - `RUN YYYY-MM-DDTHH:MM` — advance simulation to that date, write SNO checkpoint, print `CHECKPOINT <date>` to stdout, wait for next command.
-  - `RELOAD_SNO` — re-read the (Python-modified) `.sno` file into memory; IOManager buffer stays warm.
-  - `QUIT` — write final SNO and exit.
-- The Hazard object and qr_Hdata arrays are reinitialised per chunk (duration changes). vecXdata, IOManager, SunObject persist across chunks.
-- Recompiled: `/home/yeti/snowmodel/snowpack-master/bin/snowpack` (version 3.7.0, Apr 23 2026).
-
-### Python changes (`autorun_snowpack.py`)
-- `SnowpackDaemon` class manages the subprocess (spawn, wait_for_checkpoint, reload_and_run, respawn, quit).
-- Daemon stdout is the pipe channel (CHECKPOINT lines); stderr is drained by a background thread and printed to console.
-- `cycle_hourly_snowpack_with_moving_profile` accepts `use_daemon=False`. When True, spawns the daemon for the first chunk (which runs automatically on spawn), then uses `reload_and_run` for subsequent steps.
-- Water-transport scheme switches (adaptive mode stabilisation switch, RE→BUCKET fallback) handled by `daemon.respawn()` — re-spawns with new INI, costs one cold start but only happens once per run.
-- `USE_DAEMON` global loaded from `settings.toml [run]`; passed to `cycle_hourly_snowpack_with_moving_profile` from `main()`.
-- Enabled by default: `use_daemon = true` in `settings.toml`.
-
-### App changes (`app.py`)
-- Added "Persistent daemon" checkbox to Settings tab Run section (alongside RAM disk checkbox).
-
----
-
-## Update — 2026-04-23 (SETTEMPS — direct in-memory temperature injection)
-
-### Problem
-Even with the daemon, each assimilation step still required:
-1. Python writing the adjusted `.sno` file (~5 ms)
-2. C++ `RELOAD_SNO` parsing and re-loading the file (~50–100 ms)
-
-### Design — SETTEMPS command
-Added a new daemon stdin command: `SETTEMPS i0:T0,i1:T1,...`
-
-- Indices are 0 = bottom layer, matching `Edata[]` order.
-- Temperatures are in Kelvin (native SNOWPACK units).
-- C++ applies `Xdata.Edata[idx].Te = T_K` directly to the in-memory state.
-- Responds `READY\n` when done; Python then sends `RUN <date>`.
-- Eliminates the SNO file round-trip for temperature-only adjustments.
-
-### C++ changes (`Main.cc`)
-- Added `SETTEMPS` branch in the daemon command loop (between `RELOAD_SNO` and `RUN` handlers).
-- Parses `"SETTEMPS i:T,i:T,..."` with `std::istringstream` + `std::stoul`/`std::stod`.
-- Uses `Xdata.getNumberOfElements()` (public accessor) to bounds-check indices.
-- Responds `READY\n` then continues waiting for `RUN`.
-- Recompiled: `/home/yeti/snowmodel/snowpack-master/bin/snowpack` (Apr 23 2026, 2491296 bytes).
-
-### Python changes (`autorun_snowpack.py`)
-- `SnowpackDaemon.settemps_and_run(adjustments, new_end)`:
-  - Sends `SETTEMPS i0:T0,...\n`, waits for `READY`, sends `RUN <date>\n`, waits for CHECKPOINT.
-  - Returns `(checkpoint_str, log_text)` like `reload_and_run`.
-- `update_sno_temperatures_from_moving_profile` adds `return_adjustments: bool = False`:
-  - When `True`: skips SNO write; returns `(adjustments, needs_reload)`.
-  - `adjustments = [(layer_idx_from_bottom, T_K), ...]` for all layers.
-  - `needs_reload=True` when wet-layer draining occurred (volume fraction changes needed) — SNO is written and caller must use `RELOAD_SNO` instead of SETTEMPS.
-  - Early-return branch (< `MIN_OBS_FOR_ADJUST` obs): always writes SNO, returns `([], True)`.
-- `SETTEMPS_SNO_WRITE_INTERVAL = 24`: daemon uses SETTEMPS for up to 24 consecutive steps, then falls back to full SNO write + RELOAD_SNO for crash recovery.
-- Cycle loop tracks `_pending_adjustments` (set each step) and `_settemps_steps_since_sno_write` counter.
-- Both are reset to `None / 0` after any `daemon.respawn()` call.
-- Disk-sync (RAM disk → real disk) skipped when SETTEMPS was used (SNO not written that step).
-
----
-
-## Update — 2026-04-23 (App improvements: completion date, LWC log scale, obs vs model tab)
-
-### Run completion date in dropdown
-- `_run_completed_date(sid)` uses `log_path(sid).stat().st_mtime` (wall-clock time the log was last written) rather than the last model timestep in the .pro file.
-- `_label()` updated to accept `t_done` kwarg; appends `" (completed YYYY-MM-DD)"` suffix to dropdown labels for completed runs.
-
-### LWC interactive plot — log scale
-- LWC data pre-transformed with `np.log10(np.clip(..., _LWC_FLOOR, None))` before passing to Plotly.
-- `customdata` carries the raw (linear) values for hover display.
-- Explicit tick labels at 0.01, 0.1, 1, 5, ≥10 kg m⁻².
-
-### Obs vs Model tab — auto-discovery and controls
-- `_OVM_HARDCODED`: list of 7 known sites with hand-written labels.
-- Auto-discovery loop appends any `sites_with_results()` entries not already in the hardcoded list as `_ovm_extra`.
-- `_OVM_ALL = _OVM_HARDCODED + _ovm_extra`: radio selector covers all completed runs.
-- "Regenerate this site" expander has three columns: start date, end date, max depth (default 10 m). Passes `--start`, `--end`, `--max-depth` to `plot_obs_vs_model.py` subprocess.
-- Auto-generation at end of run: `autorun_snowpack.py` calls `plot_obs_vs_model.py <sid>` via subprocess after `main()` completes.
-
-### Obs vs Model figure layout
-- `figsize` reduced from `(20, 16)` to `(20, 11.2)` (−30% height per subplot).
-- Legend repositioned to `bbox_to_anchor=(1.01, 1.0)` so top of legend aligns with top of upper subplot.
-- `make_figure()` signature extended: `make_figure(site, t_start_override, t_end_override, max_depth)`.
-- `load_observed` and `load_modelled` both accept `depth_grid` kwarg built from `max_depth`.
-- `site_from_sid(sid)`: auto-discovers the largest `.pro` file in `output/`, derives human label from sid string. Used when autorun calls the script at end of run.
-
----
-
-## Update — 2026-04-23 (SNOWPACK patched source files in repo; RE density-dependent θᵣ)
-
-### Patched source files now tracked in repo
-- `snowpack/Main.cc` — SETTEMPS + daemon patch (already present).
-- `snowpack/vanGenuchten.cc` — new: density-dependent residual saturation (see below).
-- `snowpack/build_snowpack.sh` — updated to copy both files into the SNOWPACK source tree before building.
-
-### RE density-dependent residual saturation (`vanGenuchten.cc`)
-Modified `SetVGParamsSnow()` in `vanGenuchten.cc` to replace the hard-coded `0.02` cap on `theta_r` with `ElementData::snowResidualWaterContent(EMS->theta[ICE])` — the same Coléou & Lesaffre (1998) formula BUCKET already uses. Added `#include <snowpack/DataClasses.h>`.
-
-**Effect by density:**
-- Low-density firn (~400 kg/m³): θᵣ ≈ 0.05–0.08 (was capped at 0.02)
-- High-density ice (>850 kg/m³): θᵣ ≈ 0.027, but clamped to `θ_water − ε` so effectively near zero for dry/dense layers
-
-Recompiled: `/home/yeti/snowmodel/snowpack-master/bin/snowpack`.
-
----
-
-## Update — 2026-04-23 (T2minus RE comparison runs and LWC analysis)
-
-### Comparison runs for 2019_T2minus_32m
-Two adaptive RE runs exist side-by-side:
-- **Fixed θᵣ:** `output/2019-T2minus-32m_TEMP_ASSIM_RUN_RE_fixed_theta_r.pro`
-- **Dynamic θᵣ:** `output/2019-T2minus-32m_TEMP_ASSIM_RUN.pro` (current, Coléou)
-Checkpoint backup: `current_snow_backup_fixed_theta_r/`, `input/initial_profile_checkpoint_backup.sno`.
-
-**Fresh start from the app**
-"Fresh start (ignore checkpoint)" checkbox appears above the Launch button. Defaults to checked for Completed/Not-yet-run selections, unchecked for Incomplete/crashed (resume is usually preferred there).
-
-A paired radio then asks: **Archive (keep a compressed copy)** or **Delete permanently**. Archive creates `output/archives/run_YYYYMMDD_HHMMSS.tar.gz` containing the previous `.pro`, `.ini`, and `autorun.log`. This is the recommended default — it preserves a record of how different setups affect results.
-
-CLI equivalent: `--fresh --fresh-mode archive|delete`
-
-**Critical: how to force a fresh run manually**
-The checkpoint lives in two places — both must be cleared before relaunching:
-1. `<site>/input/initial_profile.sno`
-2. `/dev/shm/snowpack_<sid>/input/initial_profile.sno` (ramdisk — setup only copies if not already present, so it persists across runs if not explicitly cleared)
-
-**Critical: always use `adaptive` for these sites, not `--water-transport RICHARDSEQUATION`**
-Pure RE from step 0 crashes immediately on melt-season spinup (SOLVER DUMP flood, 3.5M lines, Python timeout after 900s on step 1). The original runs all used adaptive mode (BUCKET for first ~2 weeks, then RE). Rate with adaptive: ~6.5 steps/s, total ~5 min for 1819 steps.
-
-### Comparison scripts
-- `compare_RE_theta_r.py` — 4-panel: temperature and LWC for both runs
-- `compare_LWC.py` — 3-panel: fixed LWC, dynamic LWC, ΔLWC difference (log scale + RdBu_r)
-- `check_density_vs_diff.py` — 3-panel: density, ice fraction, ΔLWC
-
-### LWC difference analysis results
-Correlation of ΔLWC (dynamic − fixed) with density over 365,619 valid pixels:
-- Pearson r = +0.42, Spearman ρ = +0.24
-
-**Unexpected finding:** Blue regions (dynamic has *less* LWC) are concentrated in **low-density firn** (300–750 kg/m³), not high-density ice. Mean ΔLWC by bin:
-- 300–450 kg/m³: −0.148 (61% blue)
-- 450–650 kg/m³: −0.07 to −0.08 (50–56% blue)
-- 750–917 kg/m³: +0.07 to +0.11 (44–46% blue)
-
-**Working hypothesis:** Higher θᵣ in low-density firn reclassifies water as immobile residual, altering percolation routing — water that pooled in low-density layers in the fixed run is redistributed or drains faster in the dynamic run. Mechanism not fully resolved.
-
-### θᵣ range in the dynamic RE run (2019_T2minus_32m)
-
-Computed from ice volume fraction (field 515) using the full Coléou formula in `DataClasses.cc`:
-
-- **Overall range: 0.000 – 0.080** (0.08 cap never reached; zero occurs where pore-space cap dominates for θᵢ > 0.971)
-- **Median: 0.029, mean: 0.029**
-- **92.5% of all layer-timesteps have θᵣ > 0.02** — the old fixed cap was binding for nearly the entire column almost all the time
-- **7.5% of layers** are dense enough (θᵢ > 0.971) that the pore-space cap drives θᵣ below 0.02 toward zero
-
-By density bin:
-
-| Density (kg/m³) | θᵣ range | Mean θᵣ |
-|---|---|---|
-| 0–211 (low-density snow) | 0.061–0.080 | 0.067 |
-| 211–367 | 0.042–0.060 | 0.047 |
-| 367–504 | 0.035–0.041 | 0.037 |
-| 504–642 | 0.031–0.035 | 0.032 |
-| 642–779 | 0.028–0.031 | 0.029 |
-| 779–871 | 0.027–0.028 | 0.028 |
-| 871–917 (near-ice) | 0.000–0.027 | 0.017 |
-
-Typical firn (most of the column) runs at ~1.5× the old fixed value.
-
-## Update — 2026-04-24
-
-### Ice-lens RE convergence fix: `max_vol_frac_ice` setting
-
-**Problem diagnosed:** The 2022_T3_25m run crashed (900 s daemon timeout) on the resume at 2022-06-09 07:00. The restart SNO contained 9 layers with θ_i = 1.0000 (porosity = 0), which makes the Richards Equation van Genuchten retention curve and hydraulic conductivity K(θ) degenerate. The RE Newton solver emitted ~18,000 "set surfacefluxrate from 0 to 0" warnings without advancing a single time step.
-
-**Fix:** Added `max_vol_frac_ice` setting (default 0.98, range 0.90–0.99) applied at every SNO write. For SNOWPACK restart files (all paths through `rewrite_sno_profiledate_and_clip_timestamps`), the fix is **mass- and enthalpy-conserving**: when θ_i > MAX_VOL_FRAC_ICE, `Layer_Thick` is scaled by the factor θ_i_old / MAX_VOL_FRAC_ICE so that the ice mass per unit area (ρ_i × θ_i × thick) and sensible heat per unit area (ρ_i × c_i × T × θ_i × thick) are both unchanged. `HS_Last` in the SNO header is updated to reflect the new total column height (~1.2 cm gain for the T3 crash profile). The air pore (θ_v) absorbs the density reduction. For the initial profile build from observed density (`write_sno_file`), a simple cap is applied without thickness adjustment — measurement precision at ρ = 917 kg/m³ is insufficient to distinguish 898 from 917.
-
-**Files changed:**
-- `settings.toml` — new `[physics] max_vol_frac_ice = 0.98`
-- `autorun_snowpack.py` — global `MAX_VOL_FRAC_ICE`, loaded and clamped in `_load_settings`; conservation logic in `rewrite_sno_profiledate_and_clip_timestamps`; simple cap in `write_sno_file`
-- `app.py` — "Max ice vol. fraction" number_input (0.90–0.99) in "Model & assimilation" expander
-
-**Conservation properties:**
-- Mass: ρ_i × θ_i × thick = const ✓ (restart paths); small error on initialization (measurement noise)
-- Sensible heat: ρ_i × c_i × T × θ_i × thick = const ✓ (restart paths)
-- Latent heat budget: conserved since ice mass is conserved ✓
-
-## Update — 2026-04-24 (2)
-
-### Four run-quality improvements
-
-**1. BUCKET/RE tracking log (`output/water_transport_log.csv`)**
-Every completed step appends a row `datetime,scheme` ("BUCKET" or "RICHARDSEQUATION") to `output/water_transport_log.csv`. File is created at the start of a run (or on the first step of a resume if not present). Readable via `read_water_transport_log(sid)` in `app.py`, which deduplicates by timestamp keeping the last write. Suitable for overlaying on plots to show which conditions triggered RE→BUCKET fallbacks.
-
-**2. ETA in progress bar**
-`autorun_snowpack.py` writes `output/run_status.json` at each step with `run_start_model`, `run_start_wall`, `step_model`, `step_wall`. The app reads this and computes current model-steps-per-second rate → ETA displayed as "· ETA X.X h / N min / <2 min" appended to the progress bar label. Only shown while running; rate resets on each resume.
-
-**3. .pro file chunking (`pro_chunk_hours`, default 720)**
-New setting `[run] pro_chunk_hours = 720`. Every 720 model hours in daemon mode: current `.pro` is moved to `output/chunks/chunk_NNNN.pro`, the daemon is respawned (which also runs the current step on a fresh file). At run end (or crash), `concatenate_pro_chunks()` merges all chunks + current `.pro` into the final `.pro` by taking the header from chunk 0 and appending data records from all sources. Non-daemon mode: file is rotated before `run_snowpack_one_step`. `chunks/` and diagnostic files are cleared on fresh start.
-
-**4. Crash log hidden while running**
-The crash log now uses `_recently_launched = bool(_fresh_t)` to suppress display immediately after a launch is triggered, preventing the old crash log from showing during the startup lag before the new process is confirmed running.
-
-## Update — 2026-04-24 (3)
-
-### Water-transport log: event-based with dense expansion at run end
-
-Replaced per-step write with a two-stage approach:
-- **During run**: only the initial scheme and subsequent transitions are written to `output/water_transport_events.csv` (sparse; typically 2–5 rows per run). The events file is rewritten each time a scheme change is detected, so it survives crashes.
-- **At run end / crash (finally block)**: events are expanded into a dense per-step `output/water_transport_log.csv` (one row per completed hourly step) by walking the events list. The `_step_scheme` variable captures the scheme that actually ran each step, including the case where RE SafeMode fires and the step completes via RE but future steps fall back to BUCKET.
-
-`read_water_transport_log(sid)` in `app.py` reads the dense CSV (deduplicates by keeping last entry per timestamp, returns datetime-indexed DataFrame with `scheme` column).
-
-### ETA note
-The `run_status.json` and ETA display will appear on the first run started after today's commits. Runs started before the commit (currently running T3) use the old code and won't write the file.
+| Script | Output |
+|--------|--------|
+| `compare_RE_theta_r.py` | 4-panel: temperature and LWC for both runs |
+| `compare_LWC.py` | 3-panel: fixed LWC, dynamic LWC, ΔLWC (log scale, RdBu_r) |
+| `check_density_vs_diff.py` | 3-panel: density, ice fraction, ΔLWC |
