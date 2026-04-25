@@ -935,6 +935,7 @@ def show_interactive_charts(sid: str) -> None:
         ("LWC & Refreezing",    ["Liquid water content", "Cumulative refreezing"]),
         ("Residual saturation", ["Residual saturation"]),
         ("Density",             ["Density"]),
+        ("Scheme overlay",      ["Water transport scheme"]),
     ]
     show = set()
     cols = st.columns(len(_CHECKBOXES))
@@ -1227,10 +1228,40 @@ document.getElementById('mk-div').on('plotly_hover',function(data){{
         cb_LWC_y = 1.0 - (np.mean(lwc_rows) - 0.5) / n_rows if lwc_rows else 0.25
         cb_SAT_y = 1.0 - (np.mean(rs_rows)  - 0.5) / n_rows if rs_rows  else 0.10
 
+        # ── Water-transport scheme overlay ───────────────────────────────── #
+        _show_scheme = "Water transport scheme" in show
+        _has_scheme_legend = False
+        if _show_scheme:
+            wt_df = read_water_transport_log(sid)
+            if wt_df is not None and not wt_df.empty:
+                is_bucket = wt_df["scheme"] == "BUCKET"
+                if is_bucket.any():
+                    # Group consecutive BUCKET rows into contiguous periods
+                    _grp = (is_bucket != is_bucket.shift()).cumsum()
+                    for _, _seg in wt_df[is_bucket].groupby(_grp[is_bucket]):
+                        fig.add_vrect(
+                            x0=_seg.index.min(), x1=_seg.index.max(),
+                            fillcolor="rgba(255,160,0,0.20)",
+                            layer="below", line_width=0,
+                        )
+                    # Dummy trace for the legend
+                    fig.add_trace(go.Scatter(
+                        x=[None], y=[None], mode="markers",
+                        marker=dict(symbol="square", size=12,
+                                    color="rgba(255,160,0,0.60)"),
+                        name="BUCKET", showlegend=True,
+                    ))
+                    _has_scheme_legend = True
+            elif wt_df is None:
+                st.caption(
+                    "Scheme overlay: no water_transport_log.csv found — "
+                    "only runs started after 2026-04-24 produce this file."
+                )
+
         fig.update_layout(
             height=fig_h,
             margin=dict(l=70, r=90, t=35, b=55),
-            showlegend=False,
+            showlegend=_has_scheme_legend,
             coloraxis=dict(
                 colorscale="Turbo",
                 cmin=zmin_T, cmax=0,

@@ -577,3 +577,7 @@ Checkpoint backups: `current_snow_backup_fixed_theta_r/`, `input/initial_profile
 | `compare_RE_theta_r.py` | 4-panel: temperature and LWC for both runs |
 | `compare_LWC.py` | 3-panel: fixed LWC, dynamic LWC, ΔLWC (log scale, RdBu_r) |
 | `check_density_vs_diff.py` | 3-panel: density, ice fraction, ΔLWC |
+
+### Water-transport scheme overlay on interactive plots
+
+A "Scheme overlay" checkbox added to the Results tab plot selector. When checked alongside any of the Plotly-based plots (Temperature, LWC & Refreezing, Residual saturation), BUCKET periods are shaded amber (`rgba(255,160,0,0.20)`) across all active subplots using Plotly `add_vrect` with `yref="paper"`. A square legend marker labelled "BUCKET" is injected so the shading is self-explanatory. RE periods are unshaded (RE is the normal state; highlighting deviations is more informative). If `water_transport_log.csv` is absent a caption explains the requirement. Grain-type and density HTML iframes are not affected.
