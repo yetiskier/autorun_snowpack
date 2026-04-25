@@ -581,3 +581,20 @@ Checkpoint backups: `current_snow_backup_fixed_theta_r/`, `input/initial_profile
 ### Water-transport scheme overlay on interactive plots
 
 A "Scheme overlay" checkbox added to the Results tab plot selector. When checked alongside any of the Plotly-based plots (Temperature, LWC & Refreezing, Residual saturation), BUCKET periods are shaded amber (`rgba(255,160,0,0.20)`) across all active subplots using Plotly `add_vrect` with `yref="paper"`. A square legend marker labelled "BUCKET" is injected so the shading is self-explanatory. RE periods are unshaded (RE is the normal state; highlighting deviations is more informative). If `water_transport_log.csv` is absent a caption explains the requirement. Grain-type and density HTML iframes are not affected.
+
+### `reconstruct_water_transport_log.py` — backfill scheme logs for completed runs
+
+Parses an existing `autorun.log` to produce `output/water_transport_log.csv` and `output/water_transport_events.csv` for runs that predate the 2026-04-24 per-step logging. Handles all transition message formats in the log:
+
+| Log message | Meaning | Event written |
+|---|---|---|
+| `Stabilization complete at T0` | t0 = step start; first RE step ends at t0+interval | `(t0+h, RE)` |
+| `T1: RE SafeMode convergence failure` | t1 = step end (ran as RE); next step is BUCKET | `(t1+h, BUCKET)` |
+| `→T1: RE timed out ... retrying with BUCKET` | t1 = step end (retried as BUCKET) | `(t1, BUCKET)` |
+| `T0: RE fallback period over` | t0 = step start; this step runs as RE | `(t0+h, RE)` |
+| `Resume: INI set to X` | scheme at resume point | initial scheme |
+
+Splits on `"Fresh start:"` lines to handle logs with multiple runs. Step interval inferred from median of first 50 consecutive step gaps.
+
+Run for all sites: `python reconstruct_water_transport_log.py`
+Run for one site: `python reconstruct_water_transport_log.py 2022_T3_25m`
