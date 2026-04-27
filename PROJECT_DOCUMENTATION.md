@@ -15,7 +15,7 @@ Automated end-to-end pipeline for running the SNOWPACK snow/firn model on boreho
 5. Outputs a `.pro` timeseries file of modelled snow/firn properties.
 6. Visualises results interactively via a Streamlit web app.
 
-**SNOWPACK binary**: `/home/yeti/snowmodel/snowpack-master/bin/snowpack`
+**SNOWPACK binary**: `~/snowmodel/snowpack-master/bin/snowpack`
 (Patched and recompiled — see §12. Do not replace with stock binaries.)
 
 ---
@@ -76,7 +76,7 @@ Each site run directory contains:
 
 ```bash
 # Correct
-cd /home/yeti/Documents/autorun_snowpack
+cd ~/Documents/autorun_snowpack
 python autorun_snowpack.py --site T3 --year 2022 --depth 25
 
 # WRONG — creates doubled site_id "2022_2022_T3_25m_25m"
