@@ -756,6 +756,55 @@ Checkpoint backups: `current_snow_backup_fixed_theta_r/`, `input/initial_profile
 
 A "Scheme overlay" checkbox added to the Results tab plot selector. When checked alongside any of the Plotly-based plots (Temperature, LWC & Refreezing, Residual saturation), BUCKET periods are shaded amber (`rgba(255,160,0,0.20)`) across all active subplots using Plotly `add_vrect` with `yref="paper"`. A square legend marker labelled "BUCKET" is injected so the shading is self-explanatory. RE periods are unshaded (RE is the normal state; highlighting deviations is more informative). If `water_transport_log.csv` is absent a caption explains the requirement. Grain-type and density HTML iframes are not affected.
 
+---
+
+## 18. Piping Refreeze Estimation (`estimate_piping_refreeze.py`)
+
+SNOWPACK is a 1-D model and cannot represent preferential flow (piping) events where meltwater bypasses the normal wetting front and refreezes at depth. The `estimate_piping_refreeze.py` script quantifies this unmodelled contribution using borehole temperature observations as a calorimeter.
+
+**Usage:**
+```bash
+python estimate_piping_refreeze.py --site T3 --year 2022 --depth 25
+```
+
+### Method — seasonal pre/post comparison
+
+For each melt season with sufficient data:
+
+1. **Pre-melt window** (≥7 days before first LWC onset): measures the baseline model-obs temperature anomaly at every depth.
+2. **Post-melt window** (≥7 days after last LWC disappears): measures the anomaly after all piping water has refrozen.
+3. At depths below the season's **maximum SNOWPACK wetting-front depth**:
+
+   ```
+   δ(z) = mean_post(T_obs − T_model)(z) − mean_pre(T_obs − T_model)(z)
+   ```
+
+4. The systematic bias cancels in the difference; positive δ(z) represents latent heat from piped water:
+
+   ```
+   m_refreeze = Σ_z  ρ(z) · c_p · max(δ(z), 0) · dz  /  L_f   [kg m⁻² = mm w.e.]
+   ```
+
+This is physically equivalent to using the firn column as a calorimeter: the pre-melt state is the blank measurement and the post-melt state contains the piping signal.
+
+**Constraints:**
+- Seasons where the borehole was drilled during the melt season (no pre-melt baseline) are skipped.
+- Seasons where the record ends before the firn refreezes are skipped.
+- A diagnostic instantaneous heat anomaly Q(t) is also computed for visualisation.
+
+**Outputs:** per-season CSV + 3-panel figure (bias map, piping anomaly curtain, Q(t) with seasonal bar).
+
+### T3 2022 25m results (branch `piping-refreeze-estimation`)
+
+| Season | Max SNOWPACK wf | Estimate | Notes |
+|--------|----------------|---------|-------|
+| 2022 | 3.1 m | skipped | Drill year — only 1 day of pre-melt data |
+| 2023 | 11.8 m | 0.0 mm | SNOWPACK itself wetted to 11.8 m; no piping signal below that |
+| 2024 | 0.1 m | 9.4 mm w.e. | Low-percolation year; observed warming at depth consistent with piping |
+| 2025 | 0.1 m | skipped | Record ends mid-melt |
+
+---
+
 ### `reconstruct_water_transport_log.py` — backfill scheme logs for completed runs
 
 Parses an existing `autorun.log` to produce `output/water_transport_log.csv` and `output/water_transport_events.csv` for runs that predate the 2026-04-24 per-step logging. Handles all transition message formats in the log:
