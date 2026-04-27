@@ -20,6 +20,79 @@ Automated end-to-end pipeline for running the SNOWPACK snow/firn model on boreho
 
 ---
 
+## 1.1 System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    INPUTS (static, per site)                        │
+│                                                                     │
+│  Borehole temperature CSV   Firn density core    PROMICE surface    │
+│  (hourly, all sensors)      (depth, weight,      change record      │
+│  AllCoreDataCommonFormat/   density kg/m³)       (daily, cm)        │
+└──────────────┬──────────────────────┬─────────────────┬────────────┘
+               │                      │                 │
+               ▼                      ▼                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│              Python Control Script  (autorun_snowpack.py)           │
+│                                                                     │
+│  ┌─────────────────┐   ┌──────────────────┐   ┌─────────────────┐  │
+│  │  Profile builder │   │  ERA5 downloader  │   │  INI / SNO      │  │
+│  │  density+T →     │   │  CDS API →        │   │  file writer    │  │
+│  │  initial .sno    │   │  site_forcing.smet│   │                 │  │
+│  └────────┬────────┘   └────────┬─────────┘   └────────┬────────┘  │
+│           └──────────────────────┴──────────────────────┘           │
+│                                        │                            │
+│                         ┌──────────────▼──────────────────┐         │
+│                         │   Assimilation loop (hourly)     │         │
+│                         │                                  │         │
+│                         │  1. Depth-correct sensor depths  │         │
+│                         │  2. Nudge model T → observed T   │◄──┐    │
+│                         │  3. Send RUN to SNOWPACK daemon  │   │    │
+│                         │  4. Receive CHECKPOINT           │   │    │
+│                         │  5. Read updated .sno            │───┘    │
+│                         └──────────────┬───────────────────┘         │
+└──────────────────────────────────────────────────────────────────────┘
+                                         │  stdin/stdout pipe
+                                         ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│              SNOWPACK  (compiled C++ daemon, patched)               │
+│                                                                     │
+│  • Reads initial .sno profile (layers: T, density, grain, LWC…)    │
+│  • Buffers ERA5 SMET forcing once; stays alive between steps        │
+│  • Runs 4 × 15-min internal sub-steps per model hour               │
+│  • Solves energy balance, compaction, water transport (RE/BUCKET)   │
+│  • Appends one timestep record to output .pro file                  │
+│  • Writes checkpoint .sno; signals CHECKPOINT to Python            │
+└──────────────────────────────────────────────────────────────────────┘
+                                         │
+                           ┌─────────────▼──────────────┐
+                           │    Output (.pro file)       │
+                           │  layers × time timeseries   │
+                           │  T, density, LWC, grain,    │
+                           │  ice fraction, …            │
+                           └───────┬────────────┬────────┘
+                                   │            │
+               ┌───────────────────▼──┐    ┌────▼──────────────────────┐
+               │  Streamlit App        │    │  plot_obs_vs_model.py     │
+               │  (app.py)             │    │  visualize_pro.py         │
+               │                       │    │                           │
+               │  ▶ Run tab            │    │  Static PNG figures:      │
+               │    launch / monitor   │    │  observed vs modelled T,  │
+               │    ETA progress bar   │    │  2-panel (obs top,        │
+               │  ⚙ Settings tab       │    │  model bottom)            │
+               │    edit settings.toml │    └───────────────────────────┘
+               │  📊 Results tab       │
+               │    interactive plots  │
+               │    (T, LWC, density,  │
+               │     grain, scheme     │
+               │     overlay)          │
+               │  🌡 Obs vs Model tab  │
+               │    static PNG viewer  │
+               └───────────────────────┘
+```
+
+---
+
 ## 2. Directory Layout
 
 ```
@@ -121,16 +194,119 @@ Fresh start can **archive** (recommended) or **delete** previous output. Archive
 6. Call `cycle_hourly_snowpack_with_moving_profile`.
 7. After loop completes: call `plot_obs_vs_model.py {sid}` to regenerate the static PNG.
 
-### 4.2 Hourly Loop (`cycle_hourly_snowpack_with_moving_profile`)
+### 4.2 Assimilation–Model Loop
 
-For each timestep `t0 → t1`:
-1. Check for scheme switch / chunk rotation (see §5, §9).
-2. Run SNOWPACK (daemon or subprocess).
-3. Check for RE convergence failure (must come **before** `if not ok: raise`).
-4. Write per-step diagnostics: `run_status.json`, water-transport event check.
-5. Validate SNO geometry.
+The core concept: SNOWPACK is an open-loop physical model — left alone it will drift away from the real firn state because small errors in forcing accumulate. The assimilation loop anchors it to observations at every hour by nudging its layer temperatures toward the borehole string, then immediately running one hour of physics forward. The corrected state becomes the initial condition for the next step.
+
+```
+ ╔══════════════════════════════════════════════════════════════════╗
+ ║  ONCE AT START                                                   ║
+ ║  1. Build initial .sno from density core + borehole T profile   ║
+ ║  2. Download ERA5 atmospheric forcing → site_forcing.smet        ║
+ ║  3. Spawn SNOWPACK daemon (loads .sno and .smet once)            ║
+ ╚══════════════════════════════════════════════════════════════════╝
+                           │
+                           ▼
+ ╔══════════════════════════════════════════════════════════════════╗
+ ║  EVERY HOUR  (t₀ → t₁)                                         ║
+ ║                                                                  ║
+ ║  ┌─────────────────────────────────────────────────────────┐    ║
+ ║  │ ASSIMILATION                                             │    ║
+ ║  │                                                          │    ║
+ ║  │  • Compute depth-corrected sensor positions (PROMICE)    │    ║
+ ║  │  • Interpolate observed T across all model layer depths  │    ║
+ ║  │  • Blend: T_new = (1−α)·T_model + α·T_obs  (α = 0.1)   │    ║
+ ║  │  • Cap: max |ΔT| = 1.0 °C per hour                      │    ║
+ ║  │  • Clamp: T_obs limited to [−60, 0] °C                  │    ║
+ ║  │    (above-surface sensors → 0 °C anchor)                 │    ║
+ ║  │  • Drain wet layers if obs T < −1 °C                     │    ║
+ ║  │  • Inject adjusted temperatures into SNOWPACK daemon      │    ║
+ ║  │    via SETTEMPS command (no file write needed)            │    ║
+ ║  └────────────────────────┬────────────────────────────────┘    ║
+ ║                            │                                     ║
+ ║                            ▼                                     ║
+ ║  ┌─────────────────────────────────────────────────────────┐    ║
+ ║  │ MODEL ADVANCE  (SNOWPACK runs t₀ → t₁)                  │    ║
+ ║  │                                                          │    ║
+ ║  │  • 4 × 15-min internal sub-steps                        │    ║
+ ║  │  • Energy balance at surface (SW, LW, turbulent fluxes) │    ║
+ ║  │  • Heat conduction through firn column                   │    ║
+ ║  │  • Compaction & densification                            │    ║
+ ║  │  • Water transport: RE or BUCKET (see §5)                │    ║
+ ║  │  • Phase change (melting / refreezing)                   │    ║
+ ║  │  • Metamorphism (grain type evolution)                   │    ║
+ ║  │  • Appends one record to output .pro file                │    ║
+ ║  │  • Writes checkpoint .sno; signals CHECKPOINT            │    ║
+ ║  └────────────────────────┬────────────────────────────────┘    ║
+ ║                            │                                     ║
+ ║                            ▼                                     ║
+ ║         Updated firn state (.sno) becomes t₁ initial state       ║
+ ║         → repeat for t₁ → t₂, t₂ → t₃, …                        ║
+ ╚══════════════════════════════════════════════════════════════════╝
+```
+
+The key trade-off in α: too small (α ≈ 0) and the model drifts freely; too large (α ≈ 1) and you are forcing the model rather than running physics. At α = 0.1 with a 1.0 °C/h cap, a 5 °C discrepancy takes ~5 hours to close, which is slow enough that SNOWPACK's physics dominate between corrections.
+
+### 4.3 Hourly Loop — Code-Level Summary
+
+For each timestep `t0 → t1` in `cycle_hourly_snowpack_with_moving_profile`:
+1. Check for scheme switch / .pro chunk rotation (see §5, §9).
+2. Run SNOWPACK (daemon SETTEMPS+RUN, or RELOAD_SNO+RUN, or subprocess).
+3. Check for RE convergence failure — **must come before** `if not ok: raise`.
+4. Write per-step diagnostics (`run_status.json`, water-transport event check).
+5. Validate SNO geometry (layer thickness, total height).
 6. Assimilate temperature (see §6).
-7. Sync checkpoint SNO to disk (if using ramdisk and SNO was written this step).
+7. Sync checkpoint SNO to disk if ramdisk is active and SNO was written this step.
+
+---
+
+## 4.4 Temperature Records and Sensor Burial
+
+### Data overview
+
+Borehole thermistor strings are installed in the firn at the time of drilling. Each string typically carries 25–32 sensors spaced at 25 cm intervals near the surface and 50 cm intervals at depth, covering 0–32 m below the surface at installation. Sensors extend slightly above the initial surface (negative depths) to capture the near-surface air–firn transition.
+
+Temperature is logged at 20–30 minute intervals and aggregated to hourly means for the model. The active sites and record lengths currently used are:
+
+| Site | Drill date | String depth | Record end | Duration |
+|------|-----------|-------------|-----------|---------|
+| T2 (2007) | Jun 2007 | 10 m | May 2009 | ~2 years |
+| T2− (2019) | May 2019 | 32 m | Aug 2019 | ~3 months |
+| T3 (2022) | Jun 2022 | 25 m | May 2025 | ~3 years |
+| T4 (2022) | Jun 2022 | 25 m | May 2025 | ~3 years |
+| T4 (2019) | May 2019 | 32 m | Aug 2019 | ~3 months |
+| CP (2023) | May 2023 | 25 m | May 2025 | ~2 years |
+| UP18 (2023) | Jun 2023 | 25 m | May 2025 | ~2 years |
+
+Records range from **~3 months** (summer-only deployments, e.g. T2minus 2019, T4 2019) to **~3 years** (ongoing multi-year strings, e.g. T3 and T4 2022).
+
+### The burial problem
+
+As snow accumulates at the surface, sensors that were originally 1 m below the surface become progressively deeper. A sensor installed 1 m below the surface at drill time may be 3–4 m below the surface three years later. If the nominal installation depth is used throughout, the model is nudged to match observed temperatures at the wrong depth — the deepest sensors would be assigned to an assimilation layer 3 m shallower than their true position.
+
+This matters because firn temperature has a strong depth gradient in the top few metres: a 3 m misassignment could introduce errors of several degrees Celsius in the assimilation target.
+
+### PROMICE depth correction
+
+The depth of each sensor at time `t` is estimated as:
+
+```
+actual_depth(t) = nominal_install_depth + cumulative_surface_change(t)
+```
+
+`cumulative_surface_change(t)` is derived from the nearest PROMICE automatic weather station (AWS), which provides daily surface height measurements. Positive values indicate net accumulation (sensors become deeper); negative values indicate net ablation (sensors become shallower).
+
+**Typical magnitudes** over the records currently modelled:
+
+| Site | Duration | Cumulative surface change |
+|------|---------|--------------------------|
+| T3 (2022) | 3 years | +352 cm (+3.5 m) |
+| CP (2023) | 2 years | +228 cm (+2.3 m) |
+| T2 (2007) | 2 years | varies; ~1–2 m typical |
+
+Over a 3-year record at T3, the shallowest active sensor shifts from ~0.25 m to ~3.75 m below the surface — a factor of 15 change in depth. Without the correction, the near-surface assimilation would be using air-temperature-influenced readings as deep-firn targets.
+
+The correction is applied at each hourly timestep via `build_corrected_depth_tables()`, which interpolates the daily PROMICE record to hourly resolution and adds the cumulative change to each sensor's nominal depth.
 
 ---
 
