@@ -1,6 +1,6 @@
 # SNOWPACK Autorun — Project Documentation
 
-> **For Claude Code sessions**: Read this file at the start of every session. Working directory: `/home/yeti/Documents/autorun_snowpack/`. Primary files: `autorun_snowpack.py`, `app.py`, `settings.toml`. After completing any meaningful change: update this file, then `git add`, `git commit`, `git push` — always in that order, always in the same turn as the code change. Never end a session with uncommitted work.
+> **For Claude Code sessions**: Read this file at the start of every session. Working directory: `~/Documents/autorun_snowpack/`. Primary files: `autorun_snowpack.py`, `app.py`, `settings.toml`. After completing any meaningful change: update this file, then `git add`, `git commit`, `git push` — always in that order, always in the same turn as the code change. Never end a session with uncommitted work.
 
 ---
 
