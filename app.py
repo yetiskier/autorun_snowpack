@@ -292,17 +292,22 @@ def output_figures(sid: str) -> list[Path]:
 
 
 def sites_with_results() -> list[str]:
-    """Return site IDs that have at least one .pro file in their output dir."""
+    """Return site IDs that have at least one .pro file, most recently run first."""
     results = []
-    for d in sorted(APP_DIR.iterdir()):
+    for d in APP_DIR.iterdir():
         if not d.is_dir():
             continue
         if not re.match(r"^\d{4}_.+_\d+m$", d.name):
             continue
         out = d / "output"
-        if out.exists() and any(out.glob("*.pro")):
-            results.append(d.name)
-    return results
+        if not out.exists():
+            continue
+        pros = list(out.glob("*.pro"))
+        if pros:
+            latest_mtime = max(p.stat().st_mtime for p in pros)
+            results.append((latest_mtime, d.name))
+    results.sort(reverse=True)
+    return [name for _, name in results]
 
 
 def find_pro_file(sid: str) -> Path | None:
