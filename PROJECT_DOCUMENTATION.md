@@ -1,6 +1,6 @@
 # SNOWPACK Autorun — Project Documentation
 
-> **For Claude Code sessions**: Read this file at the start of every session. Working directory: `~/Documents/autorun_snowpack/`. Primary files: `autorun_snowpack.py`, `app.py`, `settings.toml`. After completing any meaningful change: update this file, then `git add`, `git commit`, `git push` — always in that order, always in the same turn as the code change. Never end a session with uncommitted work.
+> **For Claude Code sessions**: Read this file at the start of every session. Working directory is the repo root (where this file lives). Primary files: `autorun_snowpack.py`, `app.py`, `settings.toml`. After completing any meaningful change: update this file, then `git add`, `git commit`, `git push` — always in that order, always in the same turn as the code change. Never end a session with uncommitted work.
 
 ---
 
@@ -15,7 +15,7 @@ Automated end-to-end pipeline for running the SNOWPACK snow/firn model on boreho
 5. Outputs a `.pro` timeseries file of modelled snow/firn properties.
 6. Visualises results interactively via a Streamlit web app.
 
-**SNOWPACK binary**: `~/snowmodel/snowpack-master/bin/snowpack`
+**SNOWPACK binary**: path configured in `settings.toml [paths] snowpack_exe`
 (Patched and recompiled — see §12. Do not replace with stock binaries.)
 
 ---
@@ -23,7 +23,7 @@ Automated end-to-end pipeline for running the SNOWPACK snow/firn model on boreho
 ## 2. Directory Layout
 
 ```
-/home/yeti/Documents/autorun_snowpack/
+{repo_root}/
 ├── autorun_snowpack.py      # Main simulation runner
 ├── app.py                   # Streamlit interactive GUI
 ├── compare_runs.py          # Side-by-side PNG comparison of two runs
@@ -75,8 +75,7 @@ Each site run directory contains:
 **CRITICAL**: The `site_id` is constructed as `f"{year}_{site}_{depth}m"`. Always pass components separately:
 
 ```bash
-# Correct
-cd ~/Documents/autorun_snowpack
+# Correct (run from repo root)
 python autorun_snowpack.py --site T3 --year 2022 --depth 25
 
 # WRONG — creates doubled site_id "2022_2022_T3_25m_25m"
@@ -102,7 +101,7 @@ python autorun_snowpack.py --site 2022_T3_25m
 
 **Fresh start**: Use `--fresh` to wipe the checkpoint and restart from the beginning. The app's "Fresh start" checkbox does the same. The checkpoint lives in **two places** — both are cleared on fresh start:
 1. `{site_dir}/input/initial_profile.sno`
-2. `/dev/shm/snowpack_{sid}/input/initial_profile.sno` (ramdisk — persists across runs unless explicitly cleared)
+2. `/dev/shm/snowpack_{sid}/input/initial_profile.sno` (ramdisk copy — persists across runs unless explicitly cleared)
 
 Fresh start can **archive** (recommended) or **delete** previous output. Archive writes `output/archives/run_YYYYMMDD_HHMMSS.tar.gz` containing the previous `.pro`, `.ini`, and `autorun.log`.
 
@@ -296,7 +295,7 @@ Daemon respawn (one cold start per scheme switch, ~1 s) is used for: BUCKET → 
 
 ### 9.2 RAM Disk
 
-`use_ramdisk = true` in `settings.toml`. `_setup_ramdisk()` creates `/dev/shm/snowpack_{sid}/` and copies hot working files (SNO, cfgfiles, current_snow) there. Large sequential-write outputs (output/, era_tmp/, cache/) stay on disk via symlinks. After each assimilation step where the SNO was written, it is synced back to disk (not done when SETTEMPS was used, since SNO was not written that step).
+`use_ramdisk = true` in `settings.toml`. `_setup_ramdisk()` creates a tmpfs directory under `/dev/shm/snowpack_{sid}/` and copies hot working files (SNO, cfgfiles, current_snow) there. Large sequential-write outputs (output/, era_tmp/, cache/) stay on disk via symlinks. After each assimilation step where the SNO was written, it is synced back to disk (not done when SETTEMPS was used, since SNO was not written that step).
 
 ### 9.3 .pro File Chunking
 
@@ -350,7 +349,6 @@ All written to `output/`; cleared on fresh start.
 ## 11. Streamlit App (`app.py`)
 
 ```bash
-cd /home/yeti/Documents/autorun_snowpack
 streamlit run app.py
 ```
 
