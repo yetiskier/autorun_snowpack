@@ -256,27 +256,44 @@ def load_observations(path: Path) -> pd.DataFrame:
 
 # ── Core computation ──────────────────────────────────────────────────────────
 def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
-                             string_depth_m: int) -> tuple:
+                             string_depth_m: int,
+                             window_hours: int = 6) -> tuple:
     """
     Run the Saito 2024 diffusion-based piping refreeze estimation.
 
-    The CN diffusion runs at the native observation timestep (sub-hourly).
-    A step is valid only when both consecutive observation rows are NaN-free
-    across the full diffusion domain AND the interval is ≤ MAX_OBS_GAP_SEC
-    (otherwise a gap in the record would produce a spuriously large dt step).
+    Observations are averaged into non-overlapping windows of ``window_hours``
+    before the CN diffusion step.  This suppresses sensor noise (reduced by
+    √(window_hours × obs_per_hour)) while retaining the ability to detect
+    events that last a few hours.
 
-    SNOWPACK refreezing is attributed to each obs-step interval by
-    interpolating the obs-gated hourly cumulative refreezing series and taking
-    the per-interval increment; it is zeroed on invalid steps.
+    Noise-to-signal guide for typical T3 firn (σ_sensor ≈ 0.008°C):
+      window   noise in mean   cond ΔT/step   SNR
+      ------   -------------   ------------   ---
+       1 h       0.006°C         0.001°C       0.2   (noise-dominated)
+       3 h       0.003°C         0.004°C       1.2
+       6 h       0.002°C         0.009°C       4
+      12 h       0.002°C         0.017°C      11
+      24 h       0.001°C         0.034°C      28
+
+    A window is valid only when every sub-hourly observation within it is
+    NaN-free across the full diffusion domain.
+
+    SNOWPACK refreezing is attributed to each window by interpolating the
+    obs-gated hourly cumulative series and taking per-window increments.
+
+    Parameters
+    ----------
+    window_hours : int
+        Averaging window length in hours (default 6).
 
     Returns
     -------
-    results    : DataFrame with one row per obs interval (sub-hourly)
+    results    : DataFrame with one row per window interval
     diff_grid  : depth grid for diffusion [m]
     T_obs_grid : T_obs on diff_grid at obs times, shape (nt, nd)
-    Q_lh_grid  : Q_lh profiles, shape (nt-1, nd); NaN on invalid intervals
+    Q_lh_grid  : Q_lh profiles, shape (n_windows-1, nd); NaN on invalid steps
     """
-    MAX_OBS_GAP_SEC = 7200   # skip interval if obs timestamps > 2 h apart
+    resample_freq = f"{window_hours}h"
 
     diff_grid = np.arange(DOMAIN_TOP_M, string_depth_m + DZ / 2, DZ)
     nd = len(diff_grid)
@@ -304,14 +321,27 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
                      bounds_error=False, fill_value=np.nan)
         T_obs_grid[i] = f(diff_grid)
 
-    # ── SNOWPACK density → interpolated to obs times ─────────────────────
+    T_sh_df = pd.DataFrame(T_obs_grid, index=obs_times)
+
+    # ── Gap check: any NaN within a window → window is invalid ───────────
+    win_has_nan = T_sh_df.resample(resample_freq).apply(
+        lambda x: bool(np.any(~np.isfinite(x.values)))
+    ).any(axis=1)
+
+    # ── Window means for CN diffusion ─────────────────────────────────────
+    T_win_df   = T_sh_df.resample(resample_freq).mean()
+    win_times  = T_win_df.index
+    n_wins     = len(win_times)
+    T_win_grid = T_win_df.values   # shape (n_wins, nd)
+
+    # ── SNOWPACK density → interpolated to window times ──────────────────
     rho_df = pd.DataFrame(rho_pro, index=pro_times)
-    rho_at_obs = (rho_df
-                  .reindex(rho_df.index.union(obs_times))
+    rho_at_win = (rho_df
+                  .reindex(rho_df.index.union(win_times))
                   .sort_index()
                   .interpolate(method="time")
-                  .reindex(obs_times)
-                  .values)   # shape (nt, nd)
+                  .reindex(win_times)
+                  .values)   # shape (n_wins, nd)
 
     # ── SNOWPACK column refreezing — same method as app.py `load_pro` ─────
     # Compute hourly refreezing; gate to obs-constrained periods using the
@@ -354,78 +384,77 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
     obs_valid_pro = obs_at_pro.notna().sum(axis=1).values >= 3
     sp_hourly_gated = np.where(obs_valid_pro, sp_hourly, 0.0)
 
-    # Build cumulative series on PRO times → interpolate to obs times → per-step diff
+    # Build cumulative series on PRO times → interpolate to window times → per-window diff
     sp_cumul_pro = np.cumsum(sp_hourly_gated)
     sp_cumul_ser = pd.Series(sp_cumul_pro, index=pro_times)
-    sp_cumul_at_obs = (sp_cumul_ser
-                       .reindex(sp_cumul_ser.index.union(obs_times))
+    sp_cumul_at_win = (sp_cumul_ser
+                       .reindex(sp_cumul_ser.index.union(win_times))
                        .sort_index()
                        .interpolate(method="time")
-                       .reindex(obs_times)
+                       .reindex(win_times)
                        .values)
-    # Per obs-step SNOWPACK refreezing (diff of cumulative, zeroed on NaN)
-    sp_step_arr = np.diff(sp_cumul_at_obs, prepend=sp_cumul_at_obs[0])
+    sp_step_arr = np.diff(sp_cumul_at_win, prepend=sp_cumul_at_win[0])
     sp_step_arr = np.where(np.isfinite(sp_step_arr), sp_step_arr, 0.0)
 
-    # ── Main loop: one CN step per consecutive obs interval ──────────────
-    Q_lh_grid = np.full((nt - 1, nd), np.nan)
+    # ── Main loop: one CN step per consecutive valid window pair ─────────
+    DT_SEC    = window_hours * 3600.0
+    Q_lh_grid = np.full((n_wins - 1, nd), np.nan)
     rows      = []
     m_cumul   = 0.0
     sp_cumul  = 0.0
 
-    for i in range(nt - 1):
-        t_i   = obs_times[i]
-        t_ip1 = obs_times[i + 1]
-        dt_sec = (t_ip1 - t_i).total_seconds()
+    for i in range(n_wins - 1):
+        win_i   = win_times[i]
+        win_ip1 = win_times[i + 1]
 
-        # Skip if timestep is too large (obs gap) or non-positive
-        if dt_sec <= 0 or dt_sec > MAX_OBS_GAP_SEC:
-            rows.append({"datetime": t_i, "valid": False,
+        # Skip if there is a gap between consecutive windows (> 1.5× expected step)
+        actual_dt = (win_ip1 - win_i).total_seconds()
+        if actual_dt > DT_SEC * 1.5:
+            rows.append({"datetime": win_i, "valid": False,
                          "wf_depth_m": np.nan, "Q_lh_J_m2": np.nan,
                          "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul,
                          "sp_refreeze_mm_we": np.nan, "sp_cumul_mm_we": sp_cumul})
             continue
 
-        T_curr = T_obs_grid[i]
-        T_next = T_obs_grid[i + 1]
+        # Both windows must be gap-free
+        if win_has_nan.get(win_i, True) or win_has_nan.get(win_ip1, True):
+            rows.append({"datetime": win_i, "valid": False,
+                         "wf_depth_m": np.nan, "Q_lh_J_m2": np.nan,
+                         "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul,
+                         "sp_refreeze_mm_we": np.nan, "sp_cumul_mm_we": sp_cumul})
+            continue
 
-        # Both endpoints must be gap-free across the full domain
+        T_curr = T_win_grid[i]
+        T_next = T_win_grid[i + 1]
+
         if np.any(~np.isfinite(T_curr)) or np.any(~np.isfinite(T_next)):
-            rows.append({"datetime": t_i, "valid": False,
+            rows.append({"datetime": win_i, "valid": False,
                          "wf_depth_m": np.nan, "Q_lh_J_m2": np.nan,
                          "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul,
                          "sp_refreeze_mm_we": np.nan, "sp_cumul_mm_we": sp_cumul})
             continue
 
-        rho = rho_at_obs[i]
+        rho = rho_at_win[i]
         if np.any(~np.isfinite(rho)):
-            rows.append({"datetime": t_i, "valid": False,
+            rows.append({"datetime": win_i, "valid": False,
                          "wf_depth_m": np.nan, "Q_lh_J_m2": np.nan,
                          "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul,
                          "sp_refreeze_mm_we": np.nan, "sp_cumul_mm_we": sp_cumul})
             continue
 
-        # SNOWPACK refreezing for this obs step (obs-gated, from cumulative diff)
         sp_step   = float(sp_step_arr[i])
         sp_cumul += sp_step
 
-        # Thermal conductivity (Calonne 2019) at current obs profile
         k = k_calonne2019(rho, T_curr)
-
-        # Crank-Nicolson forward step at native obs timestep
         T_cond_int = crank_nicolson_step(
-            T_curr, rho, k, DZ, dt_sec, T_next[0], T_next[-1])
+            T_curr, rho, k, DZ, actual_dt, T_next[0], T_next[-1])
         T_cond = np.concatenate([[T_next[0]], T_cond_int, [T_next[-1]]])
 
-        # Latent heat residual [J m⁻³]
         Q_lh = rho * CP_ICE * (T_next - T_cond)
         Q_lh[[0, -1]] = 0.0
         Q_lh_grid[i]  = Q_lh
 
-        # Obs wetting front from current obs profile
         wf = obs_wetting_front(T_curr, diff_grid)
-
-        # Piping: positive Q_lh strictly below obs wetting front
         if np.isnan(wf):
             Q_pipe = np.zeros(nd)
         else:
@@ -436,7 +465,7 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
         m_step   = Q_total / L_F
         m_cumul += m_step
 
-        rows.append({"datetime": t_i, "valid": True,
+        rows.append({"datetime": win_i, "valid": True,
                      "wf_depth_m": wf, "Q_lh_J_m2": Q_total,
                      "m_step_mm_we": m_step, "m_cumul_mm_we": m_cumul,
                      "sp_refreeze_mm_we": sp_step, "sp_cumul_mm_we": sp_cumul})
@@ -478,7 +507,8 @@ def melt_sanity_check(pro: dict, obs_times: pd.DatetimeIndex,
 def make_figure(results: pd.DataFrame, diff_grid: np.ndarray,
                 T_on_grid: np.ndarray, Q_lh_grid: np.ndarray,
                 obs_times: pd.DatetimeIndex, site_label: str,
-                out_path: Path) -> None:
+                out_path: Path, window_hours: int = 6,
+                T_obs_times: pd.DatetimeIndex = None) -> None:
     """
     Four-panel figure (shared x-axis, tick labels on bottom panel only):
       1. T_obs depth-time curtain with obs wetting front
@@ -490,15 +520,16 @@ def make_figure(results: pd.DataFrame, diff_grid: np.ndarray,
       4. Cumulative refreezing [mm w.e.]:
          SNOWPACK (blue), piping (red), total (black dashed)
     """
-    # ── Aggregate sub-hourly obs to daily for legible curtain display ─────
-    # The CN computation runs at obs timestep resolution; plotting every step
-    # at sub-hourly resolution would produce illegibly thin stripes and huge
-    # file sizes.  We resample T_obs and Q_lh to daily means/max for display.
-    res_dt   = pd.DatetimeIndex(results["datetime"])
+    # ── Aggregate to daily for legible curtain display ────────────────────
+    # T_on_grid may be at full obs resolution; Q_lh_grid is at window resolution.
+    # Both are resampled to daily means/max for display.
+    res_dt   = pd.DatetimeIndex(results["datetime"])   # window-start timestamps
     nd       = len(diff_grid)
 
-    T_df     = pd.DataFrame(T_on_grid[:-1], index=res_dt)
-    Q_df     = pd.DataFrame(
+    # T_obs: use T_obs_times if provided (full obs resolution), else window times
+    T_idx = T_obs_times[:-1] if T_obs_times is not None else res_dt
+    T_df  = pd.DataFrame(T_on_grid[:len(T_idx)], index=T_idx)
+    Q_df  = pd.DataFrame(
         np.where(Q_lh_grid > 0, Q_lh_grid, np.nan),   # positive only
         index=res_dt)
 
@@ -621,7 +652,7 @@ def make_figure(results: pd.DataFrame, diff_grid: np.ndarray,
              rotation=30, ha="right", fontsize=9)
     axes[-1].set_xlim(t_mpl[0], t_mpl[-1])
 
-    fig.suptitle(f"Piping refreeze estimate (Saito 2024 method) — {site_label}",
+    fig.suptitle(f"Piping refreeze estimate (Saito 2024, {window_hours}-h window) — {site_label}",
                  fontsize=12, fontweight="bold")
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"Saved → {out_path}")
@@ -633,9 +664,13 @@ def main():
         description="Estimate piping refreezing via Saito et al. (2024) method.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--site",  default="T3",  help="Site name, e.g. T3")
-    p.add_argument("--year",  type=int, default=2022, help="Drill year")
-    p.add_argument("--depth", type=int, default=25,   help="String depth (m)")
+    p.add_argument("--site",         default="T3",  help="Site name, e.g. T3")
+    p.add_argument("--year",         type=int, default=2022, help="Drill year")
+    p.add_argument("--depth",        type=int, default=25,   help="String depth (m)")
+    p.add_argument("--window-hours", type=int, default=6,
+                   help="Averaging window for CN step in hours (default 6). "
+                        "Shorter windows capture faster events but amplify "
+                        "sensor noise; see docstring for SNR guide.")
     args = p.parse_args()
 
     paths = build_paths(args.year, args.site, args.depth)
@@ -657,14 +692,15 @@ def main():
     print(f"  Sensor depths: {obs.columns.min():.2f} – "
           f"{obs.columns.max():.2f} m  ({len(obs.columns)} sensors)")
 
-    print("Running CN diffusion piping estimation …")
+    print(f"Running CN diffusion piping estimation "
+          f"(window = {args.window_hours} h) …")
     results, diff_grid, T_obs_grid, Q_lh_grid = compute_piping_refreeze(
-        obs, pro, args.depth)
+        obs, pro, args.depth, window_hours=args.window_hours)
 
     n_valid   = results["valid"].sum()
     n_total   = len(results)
     total_mwe = results["m_cumul_mm_we"].iloc[-1]
-    print(f"  Obs intervals: {n_valid}/{n_total} valid "
+    print(f"  {args.window_hours}-h windows: {n_valid}/{n_total} valid "
           f"({100*n_valid/n_total:.1f}%)")
     print(f"\n  Total piping refreeze: {total_mwe:.2f} mm w.e.")
 
@@ -690,7 +726,9 @@ def main():
     print("Plotting …")
     make_figure(results, diff_grid, T_obs_grid, Q_lh_grid,
                 pd.DatetimeIndex(results["datetime"]),
-                paths["site_label"], paths["out_fig"])
+                paths["site_label"], paths["out_fig"],
+                window_hours=args.window_hours,
+                T_obs_times=obs.index)
 
 
 if __name__ == "__main__":

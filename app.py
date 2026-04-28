@@ -1958,19 +1958,38 @@ with tab_pipe:
                      caption=f"{_pipe_choice} — piping refreeze estimate (Saito 2024)",
                      use_container_width=True)
         else:
-            st.info("Figure not yet generated — click **Run estimate** below.")
+            st.info("Figure not yet generated — click **▶ Run estimate** below.")
 
         st.markdown("---")
 
-        if st.button("▶ Run estimate", key="pipe_run"):
+        _pc1, _pc2 = st.columns([1, 3])
+        _pipe_window = _pc1.selectbox(
+            "Averaging window",
+            options=[1, 3, 6, 12, 24],
+            index=2,   # default 6 h
+            format_func=lambda h: f"{h} h",
+            key="pipe_window_hours",
+            help=(
+                "Window over which observations are averaged before each "
+                "Crank-Nicolson step.  Shorter windows capture faster events "
+                "but amplify sensor noise.  "
+                "Approximate signal-to-noise ratios: 1 h → 0.2, 3 h → 1.2, "
+                "6 h → 4, 12 h → 11, 24 h → 28."
+            ),
+        )
+
+        if _pc2.button("▶ Run estimate", key="pipe_run"):
             _pipe_cmd = [
                 _pipe_sys.executable,
                 str(APP_DIR / "estimate_piping_refreeze.py"),
-                "--site",  _pipe_site_s,
-                "--year",  _pipe_year,
-                "--depth", _pipe_depth_s,
+                "--site",         _pipe_site_s,
+                "--year",         _pipe_year,
+                "--depth",        _pipe_depth_s,
+                "--window-hours", str(_pipe_window),
             ]
-            with st.spinner(f"Running piping estimate for {_pipe_choice} …"):
+            with st.spinner(
+                    f"Running piping estimate for {_pipe_choice} "
+                    f"({_pipe_window}-h window) …"):
                 _pipe_result = _pipe_sp.run(
                     _pipe_cmd, capture_output=True, text=True, cwd=str(APP_DIR)
                 )
@@ -1983,19 +2002,22 @@ with tab_pipe:
                 st.text(_pipe_result.stderr)
 
         if _pipe_csv.exists():
-            with st.expander("Show per-day results table", expanded=False):
+            with st.expander("Show results table", expanded=False):
                 import pandas as _pipe_pd
                 _pipe_df = _pipe_pd.read_csv(_pipe_csv, parse_dates=["datetime"])
                 _valid   = _pipe_df[_pipe_df["valid"] == True]
                 st.dataframe(
                     _valid[["datetime", "wf_depth_m",
-                             "Q_lh_J_m2", "m_step_mm_we", "m_cumul_mm_we"]]
+                             "Q_lh_J_m2", "m_step_mm_we", "m_cumul_mm_we",
+                             "sp_refreeze_mm_we", "sp_cumul_mm_we"]]
                     .rename(columns={
-                        "datetime":      "Date",
-                        "wf_depth_m":    "Wetting front (m)",
-                        "Q_lh_J_m2":     "Q_pipe (J m⁻²)",
-                        "m_step_mm_we":  "Δm (mm w.e.)",
-                        "m_cumul_mm_we": "Cumulative (mm w.e.)",
+                        "datetime":          "Timestamp",
+                        "wf_depth_m":        "Wetting front (m)",
+                        "Q_lh_J_m2":         "Q_pipe (J m⁻²)",
+                        "m_step_mm_we":      "Piping Δm (mm w.e.)",
+                        "m_cumul_mm_we":     "Piping cumul. (mm w.e.)",
+                        "sp_refreeze_mm_we": "SNOWPACK Δm (mm w.e.)",
+                        "sp_cumul_mm_we":    "SNOWPACK cumul. (mm w.e.)",
                     }),
                     use_container_width=True,
                 )

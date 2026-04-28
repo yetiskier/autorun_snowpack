@@ -618,8 +618,9 @@ Auto-discovers sites that have both a `.pro` output file **and** an observed tem
 
 - **Site radio**: one button per eligible site.
 - **Figure display**: shows `{site}/output/{site_id}_piping_refreeze.png` if it exists; otherwise prompts to run the estimate.
-- **▶ Run estimate**: launches `estimate_piping_refreeze.py --site … --year … --depth …` as a subprocess; stdout (per-year summary) is shown on completion.
-- **Results table expander**: loads `{site_id}_piping_refreeze.csv` and displays the valid daily rows (date, wetting front depth, Q_pipe, Δm, cumulative mm w.e.).
+- **Averaging window selector**: dropdown (1, 3, 6, 12, 24 h; default 6 h); see SNR table in §18 for guidance.
+- **▶ Run estimate**: launches `estimate_piping_refreeze.py --site … --year … --depth … --window-hours N` as a subprocess; stdout summary shown on completion.
+- **Results table expander**: loads `{site_id}_piping_refreeze.csv` and displays the valid rows (timestamp, wetting front depth, Q_pipe, piping Δm, SNOWPACK Δm, both cumulatives in mm w.e.).
 
 ---
 
@@ -822,7 +823,23 @@ For each consecutive pair of **daily-mean** temperature profiles with no NaN gap
    m_piping = Σ_z max(Q_lh(z), 0) · dz  /  L_f   [kg m⁻² = mm w.e.]
    ```
 
-**Why daily averaging:** at 30-minute observation intervals the conductive temperature change per step (~0.001°C) is smaller than sensor noise (~0.008°C). Daily averaging reduces noise by ~7× while the physical signal (daily conductive change ~0.01–0.1°C) remains intact, matching Saito et al. (2024) who explicitly use 24-hour time steps.
+**Averaging window (`--window-hours`, default 6):** observations are averaged into
+non-overlapping windows before each CN step.  At native 30-minute resolution the
+conductive ΔT per step (~0.001°C) is smaller than sensor noise (~0.008°C), making
+Q_lh noise-dominated.  Averaging suppresses noise by √(N_obs_per_window) while
+preserving events that last a few hours.  Approximate signal-to-noise ratios for
+T3 firn:
+
+| Window | Noise in mean | Cond ΔT/step | SNR |
+|--------|--------------|-------------|-----|
+| 1 h    | 0.006°C      | 0.001°C     | 0.2 |
+| 3 h    | 0.003°C      | 0.004°C     | 1.2 |
+| 6 h    | 0.002°C      | 0.009°C     | 4   |
+| 12 h   | 0.002°C      | 0.017°C     | 11  |
+| 24 h   | 0.001°C      | 0.034°C     | 28  |
+
+Default 6 h balances noise suppression with the ability to detect events lasting a few
+hours.  T3 2022 25m results: 6 h → 100 mm w.e., 24 h → 78 mm w.e.
 
 **Gap policy:** a calendar day is valid only if every sub-hourly observation in that day has no NaN at any depth in the domain. A single gap anywhere in the 24-hour window invalidates that day.
 
