@@ -380,18 +380,17 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
         day_i   = daily_times[i]
         day_ip1 = daily_times[i + 1]
 
-        # ── SNOWPACK column refreezing for this day (pre-computed above) ──
-        sp_step  = float(sp_daily_ser.get(day_i, 0.0))
-        sp_cumul += sp_step
-
-        # Skip if either day has a gap anywhere in the domain
+        # Gap check first — SNOWPACK refreezing is only counted when the model
+        # is constrained by observations.  During obs gaps SNOWPACK runs
+        # unbounded and any apparent refreezing (often a large LWC dump at
+        # gap-end) is a model artefact, not real.
         gap_i   = day_has_nan.get(day_i,   True)
         gap_ip1 = day_has_nan.get(day_ip1, True)
         if gap_i or gap_ip1:
             rows.append({"datetime": day_i, "valid": False,
                          "wf_depth_m": np.nan, "Q_lh_J_m2": np.nan,
                          "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul,
-                         "sp_refreeze_mm_we": sp_step, "sp_cumul_mm_we": sp_cumul})
+                         "sp_refreeze_mm_we": np.nan, "sp_cumul_mm_we": sp_cumul})
             continue
 
         T_curr = T_daily_grid[i]
@@ -401,7 +400,7 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
             rows.append({"datetime": day_i, "valid": False,
                          "wf_depth_m": np.nan, "Q_lh_J_m2": np.nan,
                          "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul,
-                         "sp_refreeze_mm_we": sp_step, "sp_cumul_mm_we": sp_cumul})
+                         "sp_refreeze_mm_we": np.nan, "sp_cumul_mm_we": sp_cumul})
             continue
 
         rho = rho_daily[i]
@@ -409,8 +408,12 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
             rows.append({"datetime": day_i, "valid": False,
                          "wf_depth_m": np.nan, "Q_lh_J_m2": np.nan,
                          "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul,
-                         "sp_refreeze_mm_we": sp_step, "sp_cumul_mm_we": sp_cumul})
+                         "sp_refreeze_mm_we": np.nan, "sp_cumul_mm_we": sp_cumul})
             continue
+
+        # ── On valid days, count SNOWPACK refreezing (model is obs-constrained) ──
+        sp_step  = float(sp_daily_ser.get(day_i, 0.0))
+        sp_cumul += sp_step
 
         # Thermal conductivity from Calonne 2019 at current daily mean T
         k = k_calonne2019(rho, T_curr)

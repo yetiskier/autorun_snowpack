@@ -824,12 +824,20 @@ For each consecutive pair of **daily-mean** temperature profiles with no NaN gap
    stacked with piping estimate (red bars) — single y-axis, same units
 4. Cumulative refreezing [mm w.e.]: SNOWPACK (blue), piping (red), total (black dashed)
 
-**SNOWPACK column refreeze** (panels 3 & 4) is computed from daily LWC decreases in the
-PRO file: `Σ_z max(ΔLWC[%], 0) × dz × 10  [mm w.e.]`.  Large spikes near obs-gap
-boundaries are LWC interpolation artefacts from unconstrained model runs and should be
-treated with caution.
+**SNOWPACK column refreeze** (panels 3 & 4) is computed using the same algorithm as the
+Results-tab cumulative refreezing (`load_pro` in `app.py`): per-element Lagrangian data,
+hourly resolution, `refreeze_step = min(Δice_mass, −ΔLWC_mass)` over firn elements where
+`h > 0` and `density < 900 kg/m³`.  Hourly increments are summed to daily totals.
 
-### T3 2022 25m results (branch `piping-refreeze-estimation`)
+**Both SNOWPACK and piping refreezing are restricted to obs-constrained days only.**
+A day is counted only if every sub-hourly observation that day has no NaN at any depth
+in the diffusion domain.  This excludes the unconstrained drift periods where SNOWPACK
+runs without temperature assimilation: during obs gaps the model accumulates LWC and
+then dumps it as a large spurious "refreezing" spike when observations resume.  For
+T3 2022 25 m, 257 mm of the apparent SNOWPACK refreezing falls in gap-affected days
+and is correctly excluded.
+
+### T3 2022 25m results (branch `piping-refreeze-estimation`, obs-constrained days only)
 
 | Year | Valid days | Obs max wf | Piping estimate | Notes |
 |------|-----------|-----------|----------------|-------|
@@ -837,7 +845,7 @@ treated with caution.
 | 2023 | 199 | 2.0 m | 57.3 mm w.e. | Deep piping signal at 5–15 m |
 | 2024 | 222 | NaN | 0.0 mm w.e. | Melt-season days excluded by NaN gaps |
 | 2025 | 80 | NaN | 0.0 mm w.e. | Record ends May 2025, no melt yet |
-| **Total** | 667/1086 | — | **78.3 mm w.e.** | SNOWPACK max wf 11.5 m (inflated by 2023 gap) |
+| **Total** | 667/1086 | — | **78.3 mm w.e.** piping; **281.4 mm w.e.** SNOWPACK; **359.7 mm** combined |
 
 ---
 
