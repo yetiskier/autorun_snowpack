@@ -320,24 +320,46 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
     n_days      = len(daily_times)
     T_daily_grid = T_daily_df.values   # shape (n_days, nd)
 
-    # ── SNOWPACK density → daily mean on diffusion grid ───────────────────
-    rho_df     = pd.DataFrame(rho_pro, index=pro_times)
-    rho_daily  = (rho_df
-                  .reindex(rho_df.index.union(daily_times))
-                  .sort_index()
-                  .interpolate(method="time")
-                  .reindex(daily_times)
-                  .values)   # shape (n_days, nd)
+    # ── SNOWPACK density and LWC → daily mean on diffusion grid ─────────────
+    rho_df  = pd.DataFrame(rho_pro, index=pro_times)
+    rho_daily = (rho_df
+                 .reindex(rho_df.index.union(daily_times))
+                 .sort_index()
+                 .interpolate(method="time")
+                 .reindex(daily_times)
+                 .values)   # shape (n_days, nd)
+
+    # SNOWPACK LWC [% vol] on diffusion grid → daily means
+    lwc_pro  = _pro_to_grid(pro_times, pro[501], pro[506], diff_grid)
+    lwc_df   = pd.DataFrame(lwc_pro, index=pro_times)
+    lwc_daily = (lwc_df
+                 .reindex(lwc_df.index.union(daily_times))
+                 .sort_index()
+                 .interpolate(method="time")
+                 .reindex(daily_times)
+                 .values)   # shape (n_days, nd)
 
     # ── Main loop: one CN step per consecutive valid daily pair ───────────
     Q_lh_grid = np.full((n_days - 1, nd), np.nan)
     rows      = []
     m_cumul   = 0.0
+    sp_cumul  = 0.0
     DT_SEC    = 86400.0   # 24-hour step
 
     for i in range(n_days - 1):
         day_i   = daily_times[i]
         day_ip1 = daily_times[i + 1]
+
+        # ── SNOWPACK column refreezing: column-integrated LWC decrease ────
+        # LWC decreasing means liquid water froze.
+        # dM [mm w.e.] = Σ_z max(ΔLWC[%], 0) / 100 × dz [m] × ρ_water [1000 kg/m³]
+        #              = Σ_z max(ΔLWC[%], 0) × dz × 10
+        lwc_i   = lwc_daily[i]
+        lwc_ip1 = lwc_daily[i + 1]
+        d_lwc   = np.where(np.isfinite(lwc_i) & np.isfinite(lwc_ip1),
+                           np.maximum(lwc_i - lwc_ip1, 0.0), 0.0)
+        sp_step  = float(np.sum(d_lwc * DZ * 10))   # mm w.e.
+        sp_cumul += sp_step
 
         # Skip if either day has a gap anywhere in the domain
         gap_i   = day_has_nan.get(day_i,   True)
@@ -345,7 +367,8 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
         if gap_i or gap_ip1:
             rows.append({"datetime": day_i, "valid": False,
                          "wf_depth_m": np.nan, "Q_lh_J_m2": np.nan,
-                         "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul})
+                         "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul,
+                         "sp_refreeze_mm_we": sp_step, "sp_cumul_mm_we": sp_cumul})
             continue
 
         T_curr = T_daily_grid[i]
@@ -354,14 +377,16 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
         if np.any(~np.isfinite(T_curr)) or np.any(~np.isfinite(T_next)):
             rows.append({"datetime": day_i, "valid": False,
                          "wf_depth_m": np.nan, "Q_lh_J_m2": np.nan,
-                         "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul})
+                         "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul,
+                         "sp_refreeze_mm_we": sp_step, "sp_cumul_mm_we": sp_cumul})
             continue
 
         rho = rho_daily[i]
         if np.any(~np.isfinite(rho)):
             rows.append({"datetime": day_i, "valid": False,
                          "wf_depth_m": np.nan, "Q_lh_J_m2": np.nan,
-                         "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul})
+                         "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul,
+                         "sp_refreeze_mm_we": sp_step, "sp_cumul_mm_we": sp_cumul})
             continue
 
         # Thermal conductivity from Calonne 2019 at current daily mean T
@@ -393,7 +418,8 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
 
         rows.append({"datetime": day_i, "valid": True,
                      "wf_depth_m": wf, "Q_lh_J_m2": Q_total,
-                     "m_step_mm_we": m_step, "m_cumul_mm_we": m_cumul})
+                     "m_step_mm_we": m_step, "m_cumul_mm_we": m_cumul,
+                     "sp_refreeze_mm_we": sp_step, "sp_cumul_mm_we": sp_cumul})
 
     return pd.DataFrame(rows), diff_grid, T_daily_grid, Q_lh_grid
 
@@ -434,124 +460,124 @@ def make_figure(results: pd.DataFrame, diff_grid: np.ndarray,
                 obs_times: pd.DatetimeIndex, site_label: str,
                 out_path: Path) -> None:
     """
-    Three-panel figure:
-      1. T_obs curtain with obs wetting front overlay
-      2. Q_lh curtain (latent heat residual — all depths)
-      3. Q_lh below wetting front only (piping signature) + cumulative refreeze
+    Four-panel figure (shared x-axis, tick labels on bottom panel only):
+      1. T_obs depth-time curtain with obs wetting front
+      2. Positive latent heat input Q_lh [J m⁻³] depth-time curtain
+         (negative values discarded — per Saito et al. these are small
+         spatial-heterogeneity artefacts, not physical heat loss)
+      3. Daily refreezing rate [mm w.e. day⁻¹]:
+         SNOWPACK column refreeze (blue) and piping estimate (red)
+      4. Cumulative refreezing [mm w.e.]:
+         SNOWPACK (blue), piping (red), total (black dashed)
     """
-    nd = len(diff_grid)
-    nt = len(obs_times)
-
-    # obs_times are the interval-start dates (one per curtain row).
-    # T_on_grid[:-1] and Q_lh_grid both have len(obs_times) rows.
+    # ── Shared coordinate arrays ──────────────────────────────────────────
     t_mpl   = mdates.date2num(obs_times.to_pydatetime())   # N cell centres
     t_edges = np.concatenate([[t_mpl[0] - 0.5 * (t_mpl[1] - t_mpl[0])],
                                0.5 * (t_mpl[:-1] + t_mpl[1:]),
                                [t_mpl[-1] + 0.5 * (t_mpl[-1] - t_mpl[-2])]])
-    # → N+1 edges for N cells ✓
-    t_mpl_all = t_mpl   # used for xlim
     d_edges = np.concatenate([[diff_grid[0] - DZ / 2],
                                0.5 * (diff_grid[:-1] + diff_grid[1:]),
                                [diff_grid[-1] + DZ / 2]])
+    wf_line = results["wf_depth_m"].values   # one per interval
 
-    # Wetting-front line: one value per interval (aligned with cell centres)
-    wf_line = results["wf_depth_m"].values   # shape N (one per interval)
-    wf_x    = t_mpl                          # N cell-centre mpl dates
+    # Positive-only Q_lh (latent heat input); negative values are discarded
+    Q_pos = np.where(Q_lh_grid > 0, Q_lh_grid, np.nan)
 
-    # Q_lh below wetting front only (piping signal)
-    Q_pipe = np.full_like(Q_lh_grid, np.nan)
-    for i, row in results.iterrows():
-        if not row.get("valid", False) or np.isnan(row["wf_depth_m"]):
-            continue
-        idx = int(i)
-        if idx >= Q_lh_grid.shape[0]:
-            continue
-        below = diff_grid > row["wf_depth_m"]
-        Q_pipe[idx] = np.where(below & (Q_lh_grid[idx] > 0),
-                                Q_lh_grid[idx], np.nan)
+    # ── Figure layout ─────────────────────────────────────────────────────
+    fig, axes = plt.subplots(
+        4, 1, figsize=(16, 18), sharex=True,
+        gridspec_kw={"height_ratios": [2.5, 2.5, 1, 1]},
+        constrained_layout=True,
+    )
 
-    fig, axes = plt.subplots(3, 1, figsize=(16, 15),
-                             gridspec_kw={"hspace": 0.10,
-                                          "height_ratios": [2, 2, 1]})
-
-    def _curtain(ax, data, cmap, norm, label, extend="both"):
+    def _curtain(ax, data, cmap, norm, ylabel_cb, extend="max"):
         masked = np.ma.masked_invalid(data)
         pm = ax.pcolormesh(t_edges, d_edges, masked.T,
                            cmap=cmap, norm=norm, shading="flat")
-        fig.colorbar(pm, ax=ax, pad=0.01, fraction=0.018,
-                     extend=extend).set_label(label, fontsize=9)
+        cb = fig.colorbar(pm, ax=ax, pad=0.01, fraction=0.018, extend=extend)
+        cb.set_label(ylabel_cb, fontsize=9)
         ax.set_ylabel("Depth (m)", fontsize=10)
         ax.set_ylim(diff_grid[-1], diff_grid[0])
         ax.yaxis.set_major_locator(plt.MultipleLocator(5))
         ax.yaxis.set_minor_locator(plt.MultipleLocator(1))
-        ax.grid(axis="y", color="grey", alpha=0.3, lw=0.5)
+        ax.grid(axis="y", color="grey", alpha=0.25, lw=0.5)
         return pm
 
-    # ── Panel 1: T_obs ────────────────────────────────────────────────────
-    T_vmax = max(abs(np.nanpercentile(T_on_grid, [2, 98])))
+    # ── Panel 1: observed firn temperature ───────────────────────────────
+    T_vmax = max(abs(np.nanpercentile(T_on_grid[np.isfinite(T_on_grid)], [1, 99])))
     _curtain(axes[0], T_on_grid[:-1], "RdYlBu_r",
              TwoSlopeNorm(vmin=-T_vmax, vcenter=-10, vmax=0),
              "T_obs (°C)", extend="both")
-    wf_x = wf_x   # already in mpl date float format
-    axes[0].plot(wf_x, wf_line, color="lime", lw=1.5,
+    axes[0].plot(t_mpl, wf_line, color="lime", lw=1.5,
                  label="Obs wetting front (−0.05°C)")
     axes[0].legend(loc="lower right", fontsize=9)
-    axes[0].set_title("Observed firn temperature", fontsize=11,
-                      fontweight="bold", loc="left")
+    axes[0].set_title("Observed firn temperature", fontsize=10,
+                      fontweight="bold", loc="left", pad=4)
 
-    # ── Panel 2: Q_lh full column ─────────────────────────────────────────
-    qlh_abs = np.nanpercentile(np.abs(Q_lh_grid[np.isfinite(Q_lh_grid)]), 98) \
-              if np.any(np.isfinite(Q_lh_grid)) else 1e4
-    qlh_abs = max(qlh_abs, 100.0)
-    _curtain(axes[1], Q_lh_grid, "RdBu_r",
-             TwoSlopeNorm(vmin=-qlh_abs, vcenter=0, vmax=qlh_abs),
-             "Q_lh (J m⁻³)", extend="both")
-    axes[1].plot(wf_x, wf_line, color="lime", lw=1.5,
+    # ── Panel 2: positive latent heat input ──────────────────────────────
+    from matplotlib.colors import LogNorm as _LogNorm
+    q_vals = Q_pos[np.isfinite(Q_pos)]
+    if len(q_vals) and q_vals.max() > 0:
+        q_vmax = float(np.nanpercentile(q_vals, 99))
+        q_vmin = max(float(np.nanpercentile(q_vals[q_vals > 0], 5)), 1.0)
+        q_norm = _LogNorm(vmin=q_vmin, vmax=q_vmax)
+    else:
+        q_norm = _LogNorm(vmin=1, vmax=1e4)
+    _curtain(axes[1], Q_pos, "hot_r", q_norm, "Q_lh  (J m⁻³)", extend="max")
+    axes[1].plot(t_mpl, wf_line, color="cyan", lw=1.5,
                  label="Obs wetting front")
     axes[1].legend(loc="lower right", fontsize=9)
     axes[1].set_title(
-        "Latent heat residual Q_lh = ρCₚ(T_obs − T_cond)  [full column]",
-        fontsize=11, fontweight="bold", loc="left")
+        "Latent heat input  Q_lh = ρCₚ(T_obs − T_cond),  positive values only",
+        fontsize=10, fontweight="bold", loc="left", pad=4)
 
-    # ── Panel 3: piping signal + cumulative refreeze ──────────────────────
-    ax  = axes[2]
-    ax2 = ax.twinx()
+    # ── Panel 3: daily refreezing rate ────────────────────────────────────
+    ax3 = axes[2]
+    t_all = mdates.date2num(pd.to_datetime(results["datetime"]).to_pydatetime())
 
-    # Integrated piping Q_lh [MJ m⁻²] — sum over depths below wf
-    valid = results[results["valid"] == True].copy()
-    if len(valid):
-        t_valid = mdates.date2num(valid["datetime"].values.astype("datetime64[ms]")
-                                  .astype(object))
-        ax.fill_between(t_valid, valid["Q_lh_J_m2"] / 1e6,
-                        alpha=0.35, color="steelblue")
-        ax.plot(t_valid, valid["Q_lh_J_m2"] / 1e6,
-                color="steelblue", lw=0.8, label="Q_pipe (MJ m⁻²)")
-        ax2.plot(t_valid, valid["m_cumul_mm_we"],
-                 color="crimson", lw=1.8, label="Cumulative refreeze (mm w.e.)")
+    sp  = results["sp_refreeze_mm_we"].fillna(0).values
+    pip = results["m_step_mm_we"].fillna(0).values
 
-    ax.set_ylabel("Integrated piping Q  (MJ m⁻²)", fontsize=10,
-                  color="steelblue")
-    ax2.set_ylabel("Cumulative piping refreeze  (mm w.e.)", fontsize=10,
-                   color="crimson")
-    ax.tick_params(axis="y", labelcolor="steelblue")
-    ax2.tick_params(axis="y", labelcolor="crimson")
-    ax.grid(axis="x", color="grey", alpha=0.3)
-    lines1, lbl1 = ax.get_legend_handles_labels()
-    lines2, lbl2 = ax2.get_legend_handles_labels()
-    ax.legend(lines1 + lines2, lbl1 + lbl2, loc="upper left", fontsize=9)
-    ax.set_title("Piping heat below obs wetting front & cumulative refreeze",
-                 fontsize=11, fontweight="bold", loc="left")
+    ax3.bar(t_all, sp,  width=0.8, color="steelblue", alpha=0.7,
+            label="SNOWPACK refreeze")
+    ax3.bar(t_all, pip, width=0.8, color="crimson", alpha=0.8,
+            bottom=sp, label="Piping refreeze")
+    ax3.set_ylabel("mm w.e. day⁻¹", fontsize=10)
+    ax3.legend(loc="upper right", fontsize=9, ncol=2)
+    ax3.grid(axis="y", color="grey", alpha=0.25, lw=0.5)
+    ax3.set_title("Daily refreezing rate", fontsize=10,
+                  fontweight="bold", loc="left", pad=4)
 
-    for ax_ in axes:
-        ax_.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
-        ax_.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
-        ax_.xaxis.set_minor_locator(mdates.MonthLocator())
-        plt.setp(ax_.xaxis.get_majorticklabels(),
-                 rotation=30, ha="right", fontsize=9)
-        ax_.set_xlim(t_mpl_all[0], t_mpl_all[-1])
+    # ── Panel 4: cumulative refreezing ────────────────────────────────────
+    ax4 = axes[3]
+    sp_cumul  = results["sp_cumul_mm_we"].ffill().fillna(0).values
+    pip_cumul = results["m_cumul_mm_we"].ffill().fillna(0).values
+    tot_cumul = sp_cumul + pip_cumul
+
+    ax4.fill_between(t_all, sp_cumul, alpha=0.25, color="steelblue")
+    ax4.fill_between(t_all, sp_cumul, tot_cumul, alpha=0.25, color="crimson")
+    ax4.plot(t_all, sp_cumul,  color="steelblue", lw=1.5,
+             label=f"SNOWPACK  ({sp_cumul[-1]:.1f} mm)")
+    ax4.plot(t_all, pip_cumul, color="crimson",   lw=1.5,
+             label=f"Piping     ({pip_cumul[-1]:.1f} mm)")
+    ax4.plot(t_all, tot_cumul, color="black",     lw=1.8, ls="--",
+             label=f"Total      ({tot_cumul[-1]:.1f} mm)")
+    ax4.set_ylabel("mm w.e.", fontsize=10)
+    ax4.legend(loc="upper left", fontsize=9)
+    ax4.grid(axis="y", color="grey", alpha=0.25, lw=0.5)
+    ax4.set_title("Cumulative refreezing", fontsize=10,
+                  fontweight="bold", loc="left", pad=4)
+
+    # ── Shared x-axis (bottom panel only shows tick labels) ───────────────
+    axes[-1].xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    axes[-1].xaxis.set_minor_locator(mdates.MonthLocator())
+    plt.setp(axes[-1].xaxis.get_majorticklabels(),
+             rotation=30, ha="right", fontsize=9)
+    axes[-1].set_xlim(t_mpl[0], t_mpl[-1])
 
     fig.suptitle(f"Piping refreeze estimate (Saito 2024 method) — {site_label}",
-                 fontsize=13, fontweight="bold", y=0.999)
+                 fontsize=12, fontweight="bold")
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"Saved → {out_path}")
 

@@ -815,10 +815,19 @@ For each consecutive pair of **daily-mean** temperature profiles with no NaN gap
 
 **Melt sanity check:** `melt_sanity_check()` reports the maximum SNOWPACK wetting-front depth during the obs-record period. A large discrepancy from the obs-based wf flags that SNOWPACK drifted unrealistically during an observation gap.
 
-**Outputs:** per-day CSV + 3-panel figure:
-1. T_obs depth–time curtain with obs wetting front
-2. Q_lh depth–time curtain (full column)
-3. Integrated piping Q below wetting front + cumulative refreeze time series
+**Outputs:** per-day CSV + 4-panel figure (shared x-axis, tick labels on bottom only):
+1. T_obs depth–time curtain with obs wetting front (−0.05°C isotherm)
+2. Positive latent heat input Q_lh [J m⁻³] depth–time curtain (log scale, hot_r);
+   negative values discarded — per Saito et al. these are small spatial-heterogeneity
+   artefacts, not physical heat loss
+3. Daily refreezing rate [mm w.e. day⁻¹]: SNOWPACK column refreeze (blue bars)
+   stacked with piping estimate (red bars) — single y-axis, same units
+4. Cumulative refreezing [mm w.e.]: SNOWPACK (blue), piping (red), total (black dashed)
+
+**SNOWPACK column refreeze** (panels 3 & 4) is computed from daily LWC decreases in the
+PRO file: `Σ_z max(ΔLWC[%], 0) × dz × 10  [mm w.e.]`.  Large spikes near obs-gap
+boundaries are LWC interpolation artefacts from unconstrained model runs and should be
+treated with caution.
 
 ### T3 2022 25m results (branch `piping-refreeze-estimation`)
 
