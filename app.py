@@ -1361,7 +1361,9 @@ document.getElementById('den-hm').on('plotly_hover',function(data){{
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_run, tab_settings, tab_results, tab_ovm = st.tabs(["▶ Run", "⚙ Settings", "📊 Results", "🌡 Obs vs Model"])
+tab_run, tab_settings, tab_results, tab_ovm, tab_pipe = st.tabs(
+    ["▶ Run", "⚙ Settings", "📊 Results", "🌡 Obs vs Model", "🧊 Piping"]
+)
 
 # ============================================================
 # TAB 1 — Run
@@ -1837,3 +1839,101 @@ with tab_ovm:
             st.rerun()
         else:
             st.error(_result.stderr)
+
+# ============================================================
+# TAB 5 — Piping refreeze
+# ============================================================
+with tab_pipe:
+    import subprocess as _pipe_sp, sys as _pipe_sys
+
+    st.markdown(
+        "Estimates meltwater refrozen by piping events at depths below the "
+        "SNOWPACK wetting front, using the Crank-Nicolson thermal diffusion "
+        "method of Saito et al. (2024).  "
+        "Figures are saved to `{site}/output/{site}_piping_refreeze.png`."
+    )
+
+    # Discover sites that have both a .pro file and an obs temperature file.
+    _OBS_DIR = APP_DIR / "AllCoreDataCommonFormat" / "Concatenated_Temperature_files"
+
+    def _piping_eligible_sites() -> list[str]:
+        eligible = []
+        for _sid in sites_with_results():
+            obs_path = _OBS_DIR / f"{_sid}_Tempconcatenated.csv"
+            if obs_path.exists():
+                eligible.append(_sid)
+        return eligible
+
+    _pipe_sites = _piping_eligible_sites()
+
+    if not _pipe_sites:
+        st.info("No sites with both model output and temperature observations found.")
+    else:
+        # Build display labels from site ID
+        def _pipe_label(sid: str) -> str:
+            parts = sid.split("_")
+            year  = parts[0] if parts[0].isdigit() else ""
+            depth = parts[-1] if parts[-1].endswith("m") else ""
+            name  = "_".join(p for p in parts[1:-1])
+            return f"{name} {depth} ({year})" if year else sid
+
+        _pipe_labels  = [_pipe_label(s) for s in _pipe_sites]
+        _pipe_choice  = st.radio("Site", _pipe_labels, horizontal=True,
+                                 key="pipe_site_radio")
+        _pipe_sid     = _pipe_sites[_pipe_labels.index(_pipe_choice)]
+
+        # Derive site components for the CLI call
+        _pipe_parts   = _pipe_sid.split("_")
+        _pipe_year    = _pipe_parts[0]
+        _pipe_depth_s = _pipe_parts[-1].rstrip("m")
+        _pipe_site_s  = "_".join(_pipe_parts[1:-1])
+
+        _pipe_fig = APP_DIR / _pipe_sid / "output" / f"{_pipe_sid}_piping_refreeze.png"
+        _pipe_csv = APP_DIR / _pipe_sid / "output" / f"{_pipe_sid}_piping_refreeze.csv"
+
+        if _pipe_fig.exists():
+            st.image(str(_pipe_fig),
+                     caption=f"{_pipe_choice} — piping refreeze estimate (Saito 2024)",
+                     use_container_width=True)
+        else:
+            st.info("Figure not yet generated — click **Run estimate** below.")
+
+        st.markdown("---")
+
+        if st.button("▶ Run estimate", key="pipe_run"):
+            _pipe_cmd = [
+                _pipe_sys.executable,
+                str(APP_DIR / "estimate_piping_refreeze.py"),
+                "--site",  _pipe_site_s,
+                "--year",  _pipe_year,
+                "--depth", _pipe_depth_s,
+            ]
+            with st.spinner(f"Running piping estimate for {_pipe_choice} …"):
+                _pipe_result = _pipe_sp.run(
+                    _pipe_cmd, capture_output=True, text=True, cwd=str(APP_DIR)
+                )
+            if _pipe_result.returncode == 0:
+                st.success("Done.")
+                st.text(_pipe_result.stdout)
+                st.rerun()
+            else:
+                st.error("Estimate failed.")
+                st.text(_pipe_result.stderr)
+
+        if _pipe_csv.exists():
+            with st.expander("Show per-day results table", expanded=False):
+                import pandas as _pipe_pd
+                _pipe_df = _pipe_pd.read_csv(_pipe_csv, parse_dates=["datetime"])
+                _valid   = _pipe_df[_pipe_df["valid"] == True]
+                st.dataframe(
+                    _valid[["datetime", "wf_depth_m",
+                             "Q_lh_J_m2", "m_step_mm_we", "m_cumul_mm_we"]]
+                    .rename(columns={
+                        "datetime":      "Date",
+                        "wf_depth_m":    "Wetting front (m)",
+                        "Q_lh_J_m2":     "Q_pipe (J m⁻²)",
+                        "m_step_mm_we":  "Δm (mm w.e.)",
+                        "m_cumul_mm_we": "Cumulative (mm w.e.)",
+                    }),
+                    use_container_width=True,
+                )
