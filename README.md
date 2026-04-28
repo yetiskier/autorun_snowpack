@@ -88,6 +88,10 @@ Automated end-to-end pipeline for running the SNOWPACK snow/firn model on boreho
                │     overlay)          │
                │  🌡 Obs vs Model tab  │
                │    static PNG viewer  │
+               │  🧊 Piping tab        │
+               │    piping refreeze    │
+               │    estimate figures   │
+               │    + run button       │
                └───────────────────────┘
 ```
 
@@ -97,12 +101,13 @@ Automated end-to-end pipeline for running the SNOWPACK snow/firn model on boreho
 
 ```
 {repo_root}/
-├── autorun_snowpack.py      # Main simulation runner
-├── app.py                   # Streamlit interactive GUI
-├── compare_runs.py          # Side-by-side PNG comparison of two runs
-├── visualize_pro.py         # Standalone static plot helper
-├── settings.toml            # Shared runtime settings (paths, physics, assimilation)
-├── hole_locations_2025.csv  # Site lat/lon/elevation lookup table
+├── autorun_snowpack.py          # Main simulation runner
+├── app.py                       # Streamlit interactive GUI
+├── compare_runs.py              # Side-by-side PNG comparison of two runs
+├── visualize_pro.py             # Standalone static plot helper
+├── estimate_piping_refreeze.py  # Piping refreeze estimator (Saito 2024 CN method)
+├── settings.toml                # Shared runtime settings (paths, physics, assimilation)
+├── hole_locations_2025.csv      # Site lat/lon/elevation lookup table
 │
 ├── AllCoreDataCommonFormat/
 │   ├── Concatenated_Temperature_files/    # Borehole temperature CSVs, all sites
@@ -536,6 +541,7 @@ streamlit run app.py
 | ⚙ Settings | Edit and save `settings.toml` |
 | 📊 Results | Per-site interactive plots (grain type, temperature, LWC, density) |
 | 🌡 Obs vs Model | Static observed vs modelled temperature figures |
+| 🧊 Piping | Piping refreeze estimate figures; auto-discovers eligible sites; Run button launches `estimate_piping_refreeze.py`; results table expander |
 
 ### 11.2 Run Tab
 
@@ -592,6 +598,15 @@ Sites: T2 (2007), T2 bucket (2007), T2− (2019), T3, T4, CP, UP18, plus any add
 - "Regenerate this site" expander: start date, end date, max depth (default 10 m) → runs `plot_obs_vs_model.py` subprocess.
 - "Regenerate all sites" button runs `plot_obs_vs_model.py` (no args).
 - Auto-regeneration runs at end of each `main()` call.
+
+### 11.6 Piping Tab
+
+Auto-discovers sites that have both a `.pro` output file **and** an observed temperature CSV in `AllCoreDataCommonFormat/Concatenated_Temperature_files/`. No hardcoded list.
+
+- **Site radio**: one button per eligible site.
+- **Figure display**: shows `{site}/output/{site_id}_piping_refreeze.png` if it exists; otherwise prompts to run the estimate.
+- **▶ Run estimate**: launches `estimate_piping_refreeze.py --site … --year … --depth …` as a subprocess; stdout (per-year summary) is shown on completion.
+- **Results table expander**: loads `{site_id}_piping_refreeze.csv` and displays the valid daily rows (date, wetting front depth, Q_pipe, Δm, cumulative mm w.e.).
 
 ---
 
