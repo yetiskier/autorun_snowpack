@@ -760,48 +760,60 @@ A "Scheme overlay" checkbox added to the Results tab plot selector. When checked
 
 ## 18. Piping Refreeze Estimation (`estimate_piping_refreeze.py`)
 
-SNOWPACK is a 1-D model and cannot represent preferential flow (piping) events where meltwater bypasses the normal wetting front and refreezes at depth. The `estimate_piping_refreeze.py` script quantifies this unmodelled contribution using borehole temperature observations as a calorimeter.
+SNOWPACK is a 1-D model and cannot represent preferential flow (piping) events where meltwater bypasses the normal wetting front and refreezes at depth. The `estimate_piping_refreeze.py` script quantifies this unmodelled contribution using the Crank-Nicolson thermal diffusion method of Saito et al. (2024, JGR Earth Surface, doi:10.1029/2024JF007667).
 
 **Usage:**
 ```bash
 python estimate_piping_refreeze.py --site T3 --year 2022 --depth 25
 ```
 
-### Method — seasonal pre/post comparison
+### Method — Saito et al. (2024) CN thermal diffusion
 
-For each melt season with sufficient data:
+For each consecutive pair of **daily-mean** temperature profiles with no NaN gaps across the full diffusion domain [1 m, string depth]:
 
-1. **Pre-melt window** (≥7 days before first LWC onset): measures the baseline model-obs temperature anomaly at every depth.
-2. **Post-melt window** (≥7 days after last LWC disappears): measures the anomaly after all piping water has refrozen.
-3. At depths below the season's **maximum SNOWPACK wetting-front depth**:
-
+1. **Thermal conductivity** at each depth node from Calonne et al. (2019):
    ```
-   δ(z) = mean_post(T_obs − T_model)(z) − mean_pre(T_obs − T_model)(z)
+   k(ρ, T) = k_2011(ρ) × k_ice(T) / k_ice(0°C)
+   k_2011(ρ) = 2.5×10⁻⁶ρ² − 1.23×10⁻⁴ρ + 0.024   [W m⁻¹ K⁻¹]
+   k_ice(T)  = 9.828 exp(−5.7×10⁻³ T_K)             [W m⁻¹ K⁻¹]
+   ```
+   Density from the evolving SNOWPACK PRO profile (code 502).
+
+2. **Crank-Nicolson forward step**: predict `T_cond(z, day+1)` from conduction alone. Dirichlet BCs from observed T at 1 m (top) and string bottom.
+
+3. **Latent heat residual** at each interior depth:
+   ```
+   Q_lh(z) = ρ(z) · Cₚ · [T_obs(z, day+1) − T_cond(z, day+1)]   [J m⁻³]
+   ```
+   Positive Q_lh = heat arriving beyond what conduction can explain.
+
+4. **Obs-based wetting front** `z_wf`: deepest depth in the connected zone where daily-mean T_obs ≥ −0.05°C, scanning down from 1 m and stopping at the first cold layer. This isolates the active percolation front from isolated deep piping warmings.
+
+5. **Piping integration**: sum `max(Q_lh, 0) × dz` only for depths strictly below `z_wf`, then divide by L_f:
+   ```
+   m_piping = Σ_z max(Q_lh(z), 0) · dz  /  L_f   [kg m⁻² = mm w.e.]
    ```
 
-4. The systematic bias cancels in the difference; positive δ(z) represents latent heat from piped water:
+**Why daily averaging:** at 30-minute observation intervals the conductive temperature change per step (~0.001°C) is smaller than sensor noise (~0.008°C). Daily averaging reduces noise by ~7× while the physical signal (daily conductive change ~0.01–0.1°C) remains intact, matching Saito et al. (2024) who explicitly use 24-hour time steps.
 
-   ```
-   m_refreeze = Σ_z  ρ(z) · c_p · max(δ(z), 0) · dz  /  L_f   [kg m⁻² = mm w.e.]
-   ```
+**Gap policy:** a calendar day is valid only if every sub-hourly observation in that day has no NaN at any depth in the domain. A single gap anywhere in the 24-hour window invalidates that day.
 
-This is physically equivalent to using the firn column as a calorimeter: the pre-melt state is the blank measurement and the post-melt state contains the piping signal.
+**Melt sanity check:** `melt_sanity_check()` reports the maximum SNOWPACK wetting-front depth during the obs-record period. A large discrepancy from the obs-based wf flags that SNOWPACK drifted unrealistically during an observation gap.
 
-**Constraints:**
-- Seasons where the borehole was drilled during the melt season (no pre-melt baseline) are skipped.
-- Seasons where the record ends before the firn refreezes are skipped.
-- A diagnostic instantaneous heat anomaly Q(t) is also computed for visualisation.
-
-**Outputs:** per-season CSV + 3-panel figure (bias map, piping anomaly curtain, Q(t) with seasonal bar).
+**Outputs:** per-day CSV + 3-panel figure:
+1. T_obs depth–time curtain with obs wetting front
+2. Q_lh depth–time curtain (full column)
+3. Integrated piping Q below wetting front + cumulative refreeze time series
 
 ### T3 2022 25m results (branch `piping-refreeze-estimation`)
 
-| Season | Max SNOWPACK wf | Estimate | Notes |
-|--------|----------------|---------|-------|
-| 2022 | 3.1 m | skipped | Drill year — only 1 day of pre-melt data |
-| 2023 | 11.8 m | 0.0 mm | SNOWPACK itself wetted to 11.8 m; no piping signal below that |
-| 2024 | 0.1 m | 9.4 mm w.e. | Low-percolation year; observed warming at depth consistent with piping |
-| 2025 | 0.1 m | skipped | Record ends mid-melt |
+| Year | Valid days | Obs max wf | Piping estimate | Notes |
+|------|-----------|-----------|----------------|-------|
+| 2022 | 166 | 2.0 m | 21.0 mm w.e. | Partial season (drilled June 8) |
+| 2023 | 199 | 2.0 m | 57.3 mm w.e. | Deep piping signal at 5–15 m |
+| 2024 | 222 | NaN | 0.0 mm w.e. | Melt-season days excluded by NaN gaps |
+| 2025 | 80 | NaN | 0.0 mm w.e. | Record ends May 2025, no melt yet |
+| **Total** | 667/1086 | — | **78.3 mm w.e.** | SNOWPACK max wf 11.5 m (inflated by 2023 gap) |
 
 ---
 
