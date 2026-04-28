@@ -10,6 +10,9 @@ AllCoreDataCommonFormat/
 *.log
 **/.autorun.pid
 
+# Reference papers (copyright/size)
+papers/
+
 # Claude Code local settings
 .claude/
 
