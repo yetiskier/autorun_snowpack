@@ -260,25 +260,24 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
     """
     Run the Saito 2024 diffusion-based piping refreeze estimation.
 
-    The CN diffusion is run on **daily-mean** temperature profiles, matching
-    Saito et al. (2024) who explicitly use 24-hour time steps.  At sub-hourly
-    resolution the temperature change per step (~0.001°C) is smaller than
-    sensor noise (~0.008°C), so Q_lh = ρCₚ(T_obs − T_cond) would be
-    dominated by measurement noise rather than latent heat.  Daily averaging
-    reduces noise by ~1/√48 ≈ 7× while the physical signal (daily conductive
-    change ~0.01–0.1°C) remains intact.
+    The CN diffusion runs at the native observation timestep (sub-hourly).
+    A step is valid only when both consecutive observation rows are NaN-free
+    across the full diffusion domain AND the interval is ≤ MAX_OBS_GAP_SEC
+    (otherwise a gap in the record would produce a spuriously large dt step).
 
-    Gap policy: a calendar day is valid only if every sub-hourly observation
-    within it has no NaN at any depth in the diffusion domain.  A single gap
-    anywhere in the 24-hour window invalidates that day's CN step.
+    SNOWPACK refreezing is attributed to each obs-step interval by
+    interpolating the obs-gated hourly cumulative refreezing series and taking
+    the per-interval increment; it is zeroed on invalid steps.
 
     Returns
     -------
-    results      : DataFrame with one row per daily interval
-    diff_grid    : depth grid used for diffusion [m]
-    T_daily_grid : daily-mean T_obs on diff_grid, shape (n_days, nd)
-    Q_lh_grid    : Q_lh profiles, shape (n_days-1, nd); NaN where invalid
+    results    : DataFrame with one row per obs interval (sub-hourly)
+    diff_grid  : depth grid for diffusion [m]
+    T_obs_grid : T_obs on diff_grid at obs times, shape (nt, nd)
+    Q_lh_grid  : Q_lh profiles, shape (nt-1, nd); NaN on invalid intervals
     """
+    MAX_OBS_GAP_SEC = 7200   # skip interval if obs timestamps > 2 h apart
+
     diff_grid = np.arange(DOMAIN_TOP_M, string_depth_m + DZ / 2, DZ)
     nd = len(diff_grid)
 
@@ -292,11 +291,10 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
     obs_dom    = obs.loc[:, in_domain]
     depths_dom = obs_depths[in_domain]
     obs_times  = obs.index
-
-    # ── Interpolate sub-hourly obs to diffusion depth grid ────────────────
-    # Keep original time resolution here; daily averaging happens below.
     nt = len(obs_times)
-    T_subhourly = np.full((nt, nd), np.nan)
+
+    # ── Interpolate obs to diffusion depth grid at each obs timestep ─────
+    T_obs_grid = np.full((nt, nd), np.nan)
     for i in range(nt):
         row  = obs_dom.iloc[i].values.astype(float)
         good = np.isfinite(row)
@@ -304,36 +302,20 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
             continue
         f = interp1d(depths_dom[good], row[good],
                      bounds_error=False, fill_value=np.nan)
-        T_subhourly[i] = f(diff_grid)
+        T_obs_grid[i] = f(diff_grid)
 
-    T_sh_df = pd.DataFrame(T_subhourly, index=obs_times)
-
-    # ── Gap check: any NaN in a calendar day → day is invalid ────────────
-    # Use min (not mean) so a single NaN propagates to the daily validity flag
-    day_has_nan = T_sh_df.resample("D").apply(
-        lambda x: bool(np.any(~np.isfinite(x.values)))
-    ).any(axis=1)    # True = this day has at least one NaN anywhere in domain
-
-    # ── Daily means for CN diffusion (Saito et al. use 24-h steps) ───────
-    T_daily_df  = T_sh_df.resample("D").mean()
-    daily_times = T_daily_df.index
-    n_days      = len(daily_times)
-    T_daily_grid = T_daily_df.values   # shape (n_days, nd)
-
-    # ── SNOWPACK density → daily mean on diffusion grid ──────────────────
-    rho_df  = pd.DataFrame(rho_pro, index=pro_times)
-    rho_daily = (rho_df
-                 .reindex(rho_df.index.union(daily_times))
-                 .sort_index()
-                 .interpolate(method="time")
-                 .reindex(daily_times)
-                 .values)   # shape (n_days, nd)
+    # ── SNOWPACK density → interpolated to obs times ─────────────────────
+    rho_df = pd.DataFrame(rho_pro, index=pro_times)
+    rho_at_obs = (rho_df
+                  .reindex(rho_df.index.union(obs_times))
+                  .sort_index()
+                  .interpolate(method="time")
+                  .reindex(obs_times)
+                  .values)   # shape (nt, nd)
 
     # ── SNOWPACK column refreezing — same method as app.py `load_pro` ─────
-    # Uses raw Lagrangian per-element data at hourly resolution.
-    # Refreezing = min(Δice_mass, −ΔLWC_mass) per step, summed to daily.
-    # This requires ice to increase AND LWC to decrease simultaneously,
-    # which is the physically correct definition.  Matches the Results tab.
+    # Compute hourly refreezing; gate to obs-constrained periods using the
+    # same ≥3-sensor validity criterion as load_pro v5.
     n_pro   = len(pro_times)
     ice_col = np.zeros(n_pro)
     lwc_col = np.zeros(n_pro)
@@ -347,107 +329,119 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
             continue
         h = h[:n]; ice = ice[:n]; lwc = lwc[:n]; den = den[:n]
         order = np.argsort(h)
-        h = h[order]; ice = ice[order]; lwc = lwc[order]; den = den[order]
-        mask = (h > 0) & (den < 900.0)   # firn only; exclude soil and glacial ice
+        h=h[order]; ice=ice[order]; lwc=lwc[order]; den=den[order]
+        mask = (h > 0) & (den < 900.0)
         if mask.sum() < 2:
             continue
-        h_f = h[mask]; ice_f = ice[mask]; lwc_f = lwc[mask]
-        nf  = len(h_f)
-        thick       = np.empty(nf)
-        thick[1:]   = (h_f[1:] - h_f[:-1]) / 100.0
-        thick[0]    = h_f[0] / 100.0
-        ice_col[ti] = np.nansum(ice_f / 100.0 * thick * 917.0)   # kg/m²
-        lwc_col[ti] = np.nansum(lwc_f / 100.0 * thick * 1000.0)  # kg/m²
+        h_f=h[mask]; ice_f=ice[mask]; lwc_f=lwc[mask]
+        nf = len(h_f)
+        thick = np.empty(nf)
+        thick[1:] = (h_f[1:] - h_f[:-1]) / 100.0
+        thick[0]  = h_f[0] / 100.0
+        ice_col[ti] = np.nansum(ice_f / 100.0 * thick * 917.0)
+        lwc_col[ti] = np.nansum(lwc_f / 100.0 * thick * 1000.0)
 
-    d_ice       = np.diff(ice_col)   # shape n_pro-1
-    d_lwc       = np.diff(lwc_col)
-    sp_hourly   = np.concatenate([[0.0], np.minimum(
+    d_ice = np.diff(ice_col)
+    d_lwc = np.diff(lwc_col)
+    sp_hourly = np.concatenate([[0.0], np.minimum(
         np.where(d_ice > 0, d_ice, 0.0),
         np.where(d_lwc < 0, -d_lwc, 0.0),
-    )])   # kg/m² = mm w.e. per hourly step
-    sp_daily_ser = (pd.Series(sp_hourly, index=pro_times)
-                    .resample("D").sum())   # mm w.e. per calendar day
+    )])
 
+    # Gate SNOWPACK refreezing to obs-constrained hours (≥3 valid sensors)
+    obs_at_pro = obs.reindex(pro_times, method="nearest",
+                              tolerance=pd.Timedelta("30min"))
+    obs_valid_pro = obs_at_pro.notna().sum(axis=1).values >= 3
+    sp_hourly_gated = np.where(obs_valid_pro, sp_hourly, 0.0)
 
-    # ── Main loop: one CN step per consecutive valid daily pair ───────────
-    Q_lh_grid = np.full((n_days - 1, nd), np.nan)
+    # Build cumulative series on PRO times → interpolate to obs times → per-step diff
+    sp_cumul_pro = np.cumsum(sp_hourly_gated)
+    sp_cumul_ser = pd.Series(sp_cumul_pro, index=pro_times)
+    sp_cumul_at_obs = (sp_cumul_ser
+                       .reindex(sp_cumul_ser.index.union(obs_times))
+                       .sort_index()
+                       .interpolate(method="time")
+                       .reindex(obs_times)
+                       .values)
+    # Per obs-step SNOWPACK refreezing (diff of cumulative, zeroed on NaN)
+    sp_step_arr = np.diff(sp_cumul_at_obs, prepend=sp_cumul_at_obs[0])
+    sp_step_arr = np.where(np.isfinite(sp_step_arr), sp_step_arr, 0.0)
+
+    # ── Main loop: one CN step per consecutive obs interval ──────────────
+    Q_lh_grid = np.full((nt - 1, nd), np.nan)
     rows      = []
     m_cumul   = 0.0
     sp_cumul  = 0.0
-    DT_SEC    = 86400.0   # 24-hour step
 
-    for i in range(n_days - 1):
-        day_i   = daily_times[i]
-        day_ip1 = daily_times[i + 1]
+    for i in range(nt - 1):
+        t_i   = obs_times[i]
+        t_ip1 = obs_times[i + 1]
+        dt_sec = (t_ip1 - t_i).total_seconds()
 
-        # Gap check first — SNOWPACK refreezing is only counted when the model
-        # is constrained by observations.  During obs gaps SNOWPACK runs
-        # unbounded and any apparent refreezing (often a large LWC dump at
-        # gap-end) is a model artefact, not real.
-        gap_i   = day_has_nan.get(day_i,   True)
-        gap_ip1 = day_has_nan.get(day_ip1, True)
-        if gap_i or gap_ip1:
-            rows.append({"datetime": day_i, "valid": False,
+        # Skip if timestep is too large (obs gap) or non-positive
+        if dt_sec <= 0 or dt_sec > MAX_OBS_GAP_SEC:
+            rows.append({"datetime": t_i, "valid": False,
                          "wf_depth_m": np.nan, "Q_lh_J_m2": np.nan,
                          "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul,
                          "sp_refreeze_mm_we": np.nan, "sp_cumul_mm_we": sp_cumul})
             continue
 
-        T_curr = T_daily_grid[i]
-        T_next = T_daily_grid[i + 1]
+        T_curr = T_obs_grid[i]
+        T_next = T_obs_grid[i + 1]
 
+        # Both endpoints must be gap-free across the full domain
         if np.any(~np.isfinite(T_curr)) or np.any(~np.isfinite(T_next)):
-            rows.append({"datetime": day_i, "valid": False,
+            rows.append({"datetime": t_i, "valid": False,
                          "wf_depth_m": np.nan, "Q_lh_J_m2": np.nan,
                          "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul,
                          "sp_refreeze_mm_we": np.nan, "sp_cumul_mm_we": sp_cumul})
             continue
 
-        rho = rho_daily[i]
+        rho = rho_at_obs[i]
         if np.any(~np.isfinite(rho)):
-            rows.append({"datetime": day_i, "valid": False,
+            rows.append({"datetime": t_i, "valid": False,
                          "wf_depth_m": np.nan, "Q_lh_J_m2": np.nan,
                          "m_step_mm_we": np.nan, "m_cumul_mm_we": m_cumul,
                          "sp_refreeze_mm_we": np.nan, "sp_cumul_mm_we": sp_cumul})
             continue
 
-        # ── On valid days, count SNOWPACK refreezing (model is obs-constrained) ──
-        sp_step  = float(sp_daily_ser.get(day_i, 0.0))
+        # SNOWPACK refreezing for this obs step (obs-gated, from cumulative diff)
+        sp_step   = float(sp_step_arr[i])
         sp_cumul += sp_step
 
-        # Thermal conductivity from Calonne 2019 at current daily mean T
+        # Thermal conductivity (Calonne 2019) at current obs profile
         k = k_calonne2019(rho, T_curr)
 
-        # Crank-Nicolson 24-hour forward step
+        # Crank-Nicolson forward step at native obs timestep
         T_cond_int = crank_nicolson_step(
-            T_curr, rho, k, DZ, DT_SEC, T_next[0], T_next[-1])
+            T_curr, rho, k, DZ, dt_sec, T_next[0], T_next[-1])
         T_cond = np.concatenate([[T_next[0]], T_cond_int, [T_next[-1]]])
 
         # Latent heat residual [J m⁻³]
         Q_lh = rho * CP_ICE * (T_next - T_cond)
-        Q_lh[[0, -1]] = 0.0   # BCs are exact by construction
+        Q_lh[[0, -1]] = 0.0
         Q_lh_grid[i]  = Q_lh
 
-        # Obs wetting front from daily-mean profile
+        # Obs wetting front from current obs profile
         wf = obs_wetting_front(T_curr, diff_grid)
 
-        # Piping signal: positive Q_lh strictly below wetting front
+        # Piping: positive Q_lh strictly below obs wetting front
         if np.isnan(wf):
             Q_pipe = np.zeros(nd)
         else:
             below  = diff_grid > wf
             Q_pipe = np.where(below & (Q_lh > 0), Q_lh, 0.0)
 
-        Q_total  = float(np.sum(Q_pipe) * DZ)   # J m⁻²
-        m_step   = Q_total / L_F                 # kg m⁻² = mm w.e.
+        Q_total  = float(np.sum(Q_pipe) * DZ)
+        m_step   = Q_total / L_F
         m_cumul += m_step
 
-        rows.append({"datetime": day_i, "valid": True,
+        rows.append({"datetime": t_i, "valid": True,
                      "wf_depth_m": wf, "Q_lh_J_m2": Q_total,
                      "m_step_mm_we": m_step, "m_cumul_mm_we": m_cumul,
                      "sp_refreeze_mm_we": sp_step, "sp_cumul_mm_we": sp_cumul})
 
-    return pd.DataFrame(rows), diff_grid, T_daily_grid, Q_lh_grid
+    return pd.DataFrame(rows), diff_grid, T_obs_grid, Q_lh_grid
 
 
 # ── Melt sanity check ────────────────────────────────────────────────────────
@@ -496,18 +490,39 @@ def make_figure(results: pd.DataFrame, diff_grid: np.ndarray,
       4. Cumulative refreezing [mm w.e.]:
          SNOWPACK (blue), piping (red), total (black dashed)
     """
-    # ── Shared coordinate arrays ──────────────────────────────────────────
-    t_mpl   = mdates.date2num(obs_times.to_pydatetime())   # N cell centres
+    # ── Aggregate sub-hourly obs to daily for legible curtain display ─────
+    # The CN computation runs at obs timestep resolution; plotting every step
+    # at sub-hourly resolution would produce illegibly thin stripes and huge
+    # file sizes.  We resample T_obs and Q_lh to daily means/max for display.
+    res_dt   = pd.DatetimeIndex(results["datetime"])
+    nd       = len(diff_grid)
+
+    T_df     = pd.DataFrame(T_on_grid[:-1], index=res_dt)
+    Q_df     = pd.DataFrame(
+        np.where(Q_lh_grid > 0, Q_lh_grid, np.nan),   # positive only
+        index=res_dt)
+
+    T_daily  = T_df.resample("D").mean()
+    Q_daily  = Q_df.resample("D").max()                # max preserves event peaks
+
+    # Wetting front: deepest valid value each day
+    wf_ser   = results.set_index("datetime")["wf_depth_m"]
+    wf_daily = wf_ser.resample("D").max()
+
+    daily_idx = T_daily.index
+    n_disp    = len(daily_idx)
+
+    t_mpl   = mdates.date2num(daily_idx.to_pydatetime())
     t_edges = np.concatenate([[t_mpl[0] - 0.5 * (t_mpl[1] - t_mpl[0])],
                                0.5 * (t_mpl[:-1] + t_mpl[1:]),
                                [t_mpl[-1] + 0.5 * (t_mpl[-1] - t_mpl[-2])]])
     d_edges = np.concatenate([[diff_grid[0] - DZ / 2],
                                0.5 * (diff_grid[:-1] + diff_grid[1:]),
                                [diff_grid[-1] + DZ / 2]])
-    wf_line = results["wf_depth_m"].values   # one per interval
 
-    # Positive-only Q_lh (latent heat input); negative values are discarded
-    Q_pos = np.where(Q_lh_grid > 0, Q_lh_grid, np.nan)
+    wf_line  = wf_daily.values
+    T_disp   = T_daily.values    # shape (n_disp, nd)
+    Q_pos    = Q_daily.values    # shape (n_disp, nd)
 
     # ── Figure layout ─────────────────────────────────────────────────────
     fig, axes = plt.subplots(
@@ -530,8 +545,8 @@ def make_figure(results: pd.DataFrame, diff_grid: np.ndarray,
         return pm
 
     # ── Panel 1: observed firn temperature ───────────────────────────────
-    T_vmax = max(abs(np.nanpercentile(T_on_grid[np.isfinite(T_on_grid)], [1, 99])))
-    _curtain(axes[0], T_on_grid[:-1], "RdYlBu_r",
+    T_vmax = max(abs(np.nanpercentile(T_disp[np.isfinite(T_disp)], [1, 99])))
+    _curtain(axes[0], T_disp, "RdYlBu_r",
              TwoSlopeNorm(vmin=-T_vmax, vcenter=-10, vmax=0),
              "T_obs (°C)", extend="both")
     axes[0].plot(t_mpl, wf_line, color="lime", lw=1.5,
@@ -643,14 +658,13 @@ def main():
           f"{obs.columns.max():.2f} m  ({len(obs.columns)} sensors)")
 
     print("Running CN diffusion piping estimation …")
-    results, diff_grid, T_daily_grid, Q_lh_grid = compute_piping_refreeze(
+    results, diff_grid, T_obs_grid, Q_lh_grid = compute_piping_refreeze(
         obs, pro, args.depth)
 
     n_valid   = results["valid"].sum()
     n_total   = len(results)
     total_mwe = results["m_cumul_mm_we"].iloc[-1]
-    daily_times = pd.DatetimeIndex(results["datetime"])
-    print(f"  Daily intervals: {n_valid}/{n_total} valid "
+    print(f"  Obs intervals: {n_valid}/{n_total} valid "
           f"({100*n_valid/n_total:.1f}%)")
     print(f"\n  Total piping refreeze: {total_mwe:.2f} mm w.e.")
 
@@ -665,7 +679,7 @@ def main():
     valid["year"] = pd.to_datetime(valid["datetime"]).dt.year
     for yr, grp in valid.groupby("year"):
         print(f"    {yr}: {grp['m_step_mm_we'].sum():.2f} mm w.e.  "
-              f"({len(grp)} days, max wf "
+              f"({len(grp)} intervals, max wf "
               f"{grp['wf_depth_m'].max():.1f} m)")
 
     # Save CSV
@@ -674,8 +688,9 @@ def main():
 
     # Plot
     print("Plotting …")
-    make_figure(results, diff_grid, T_daily_grid, Q_lh_grid,
-                daily_times, paths["site_label"], paths["out_fig"])
+    make_figure(results, diff_grid, T_obs_grid, Q_lh_grid,
+                pd.DatetimeIndex(results["datetime"]),
+                paths["site_label"], paths["out_fig"])
 
 
 if __name__ == "__main__":

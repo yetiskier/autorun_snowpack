@@ -850,6 +850,24 @@ then dumps it as a large spurious "refreezing" spike when observations resume.  
 T3 2022 25 m, 257 mm of the apparent SNOWPACK refreezing falls in gap-affected days
 and is correctly excluded.
 
+### Investigation: Q_lh signal at 20+ m
+
+In panel 2 of the piping figure, low-magnitude positive Q_lh is visible across nearly the full depth column, including 20+ m year-round.  We checked whether SNOWPACK ever produces liquid water that deep — over the full 3-year T3 record, SNOWPACK never has LWC > 0.1% below **11.5 m**.  So the deep Q_lh is not refreezing of model-tracked water.
+
+The deep Q_lh magnitudes are 100–1000× smaller (~10²–10³ J m⁻³) than the strong piping band at 5–15 m (~10⁴–10⁵ J m⁻³).  Their integrated contribution to the piping total is **< 1 mm w.e.** — essentially negligible.
+
+We considered whether basal-BC errors could drive these variations:
+
+1. **Bottom Dirichlet BC is observation-anchored.** The CN scheme uses observed daily-mean temperature at the deepest sensor (string bottom) as the bottom Dirichlet BC, so the BC itself is ground truth — not a SNOWPACK extrapolation.
+
+2. **What does propagate from SNOWPACK at depth is density** (PRO code 502), which feeds Calonne 2019's `k(ρ, T)`.  SNOWPACK's basal-layer build (§7.1) extrapolates the observed gradient 15 m below the deepest thermistor; biased density at depth → biased k → non-zero Q_lh residual.  However, density at 15–25 m at T3 changes very slowly (compaction is glacial-slow once near 700–800 kg m⁻³), so density-driven k errors should produce a roughly *constant* offset, not the patchy variations observed.
+
+3. **More likely explanation: ice-lens heterogeneity.** The Calonne 2019 formula assumes uniform firn microstructure; real ice lenses (very common at T3) have ~3× higher k locally.  The 0.5 m grid averages over those lenses, so layers with a thin ice lens get an effective k that's wrong by 30–50%, producing patchy Q_lh residuals exactly where lenses sit.
+
+4. **Sensor noise floor.**  At sub-daily steps, sensor noise (~0.008°C resolution) propagates to Q_lh ≈ ρCₚ × σ_T ≈ 14 kJ m⁻³ per step per cell.  Daily averaging reduces this by ~7×, but a faint speckled background remains.
+
+**Decision (2026-04-27):** the deep noise contributes <1 mm w.e. and is left in the figure for honesty.  Panel 2's colour scale `vmin = 500 J m⁻³` keeps the visual emphasis on the real piping signal.  A `MAX_PIPE_DEPTH` parameter could clip the integration to ≤15 m if a more conservative estimate is desired; the total would change by less than 1 mm.
+
 ### T3 2022 25m results (branch `piping-refreeze-estimation`, obs-constrained days only)
 
 | Year | Valid days | Obs max wf | Piping estimate | Notes |
