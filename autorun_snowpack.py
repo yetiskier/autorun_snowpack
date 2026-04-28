@@ -527,6 +527,22 @@ def read_density_profile(path: Path) -> pd.DataFrame:
     out["mid_m"] = 0.5 * (out["top_m"] + out["bottom_m"])
     out["thickness_m"] = out["bottom_m"] - out["top_m"]
     out = out[(out["thickness_m"] > 0) & np.isfinite(out["density_kg_m3"])].copy()
+    out = out.sort_values("top_m").reset_index(drop=True)
+
+    # Clip overlapping layer boundaries.  Firn cores are measured in sections
+    # that sometimes overlap slightly (e.g. two adjacent sections both claiming
+    # depth 28.75–29.50 m).  If these overlaps are left in, the sum of all
+    # Layer_Thick values exceeds the actual column depth, so SNOWPACK places
+    # the surface higher than HS_Last.  It then reorganises the top layers
+    # across the first few model steps, producing a degenerate thick near-zero-
+    # ice surface layer that causes the thermal solver to crash.
+    for i in range(len(out) - 1):
+        if out.at[i, "bottom_m"] > out.at[i + 1, "top_m"]:
+            out.at[i, "bottom_m"] = out.at[i + 1, "top_m"]
+    out["thickness_m"] = out["bottom_m"] - out["top_m"]
+    out = out[out["thickness_m"] > 0].copy()
+    out["mid_m"] = 0.5 * (out["top_m"] + out["bottom_m"])
+
     return out.sort_values("mid_m").reset_index(drop=True)
 
 
@@ -1331,6 +1347,9 @@ def write_sno_file(
             vw = round(float(r['Vol_Frac_W']), 10)
             vs = round(float(r['Vol_Frac_S']), 10)
             vv = round(1.0 - vi - vw - vs, 10)
+            # Keep Rho_S consistent with the (possibly capped) Vol_Frac_I so
+            # SNOWPACK's internal density matches what vol-fraction arithmetic implies.
+            rho_s = vi * ICE_DENSITY + vw * WATER_DENSITY
             f.write(
                 f"{r['timestamp']} "
                 f"{r['Layer_Thick']:.5f} "
@@ -1339,7 +1358,7 @@ def write_sno_file(
                 f"{vw:.10f} "
                 f"{vv:.10f} "
                 f"{vs:.10f} "
-                f"{r['Rho_S']:.6f} "
+                f"{rho_s:.6f} "
                 f"{r['Conduc_S']:.3f} "
                 f"{r['HeatCapac_S']:.3f} "
                 f"{r['rg']:.3f} "
@@ -2396,6 +2415,19 @@ def rewrite_sno_profiledate_and_clip_timestamps(
     frac_v_col = next((f for f in fields if f == "Vol_Frac_V"), None)
     frac_s_col = next((f for f in fields if f == "Vol_Frac_S"), None)
     thick_col  = next((f for f in fields if f == "Layer_Thick"), None)
+    rho_col    = next((f for f in fields if f == "Rho_S"), None)
+
+    # Fix zero or non-finite Rho_S before SNOWPACK sees the file again.
+    # SNOWPACK's VapourTransport::LayerToLayer divides by density; Rho_S=0
+    # (which can appear in long-run checkpoints via layer-merge artefacts)
+    # produces a singular matrix and crashes the solver.
+    if rho_col and frac_i_col:
+        for idx in df.index:
+            rho = float(df.at[idx, rho_col])
+            if not np.isfinite(rho) or rho <= 0.0:
+                vi = float(df.at[idx, frac_i_col])
+                vw = float(df.at[idx, frac_w_col]) if frac_w_col else 0.0
+                df.at[idx, rho_col] = vi * ICE_DENSITY + vw * WATER_DENSITY
 
     hs_changed = False
     if frac_i_col and thick_col:
@@ -3578,7 +3610,14 @@ def main() -> None:
         validate_layer_df_for_sno(layer_df)
         sno_df = build_sno_dataframe(layer_df, first_ts)
 
-        hs_last = float(layer_df["bottom_m"].max())
+        # HS_Last must equal the sum of all Layer_Thick values.
+        # Using layer_df["bottom_m"].max() can differ from that sum when
+        # the density core has small gaps between sections (or after
+        # overlap-clipping trims some boundaries).  A mismatch makes
+        # SNOWPACK detect a spurious height change event on step 1, which
+        # reorganises the top layers and can produce a degenerate zero-ice
+        # surface layer that crashes the thermal solver.
+        hs_last = float(sno_df["Layer_Thick"].sum())
         erosion_level = len(sno_df) + 6
         profile_date = first_ts.floor("min")
 
