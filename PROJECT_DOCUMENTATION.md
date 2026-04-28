@@ -575,7 +575,7 @@ Four checkboxes (none checked by default):
 
 **LWC plot**: Data pre-transformed with `np.log10(np.clip(..., _LWC_FLOOR, None))`; `customdata` carries raw values for hover. Explicit tick labels at 0.01, 0.1, 1, 5, ≥10 kg m⁻².
 
-**Cumulative refreezing** (from `load_pro`):
+**Cumulative refreezing** (from `load_pro`, v5):
 ```python
 d_ice = np.diff(ice_col)          # ice volume fraction change
 d_lwc = np.diff(lwc_col)          # LWC change
@@ -583,9 +583,22 @@ refreezing = np.minimum(
     np.where(d_ice > 0, d_ice, 0.0),    # ice increasing
     np.where(d_lwc < 0, -d_lwc, 0.0),   # LWC decreasing
 )
+# Obs availability mask: only count refreezing during PRO timesteps where
+# at least 3 sensors had finite readings (matches the assimilation threshold
+# `min_obs_for_adjust`).  During obs gaps SNOWPACK runs unconstrained and any
+# apparent refreezing is unconstrained drift, not real.
+step_valid = valid_obs[1:] & valid_obs[:-1]
+refreezing = np.where(step_valid, refreezing, 0.0)
 cumul = np.concatenate([[0.0], np.cumsum(refreezing)])
 ```
 No credit system — refreezing at depth is permanent in these firn columns, so simple cumulative sum is correct.
+
+**v5 obs-availability gate (2026-04-27):** the cumulative refreezing previously
+included drift periods.  For T3 2022 25 m, the gate reduces the total from
+~539 mm to ~282 mm by excluding ~257 mm of unconstrained-drift refreezing
+(notably the 169 mm gap-end LWC dump on 2023-08-03).  This makes the
+Results-tab cumulative refreezing directly comparable to the piping-figure
+SNOWPACK refreezing component.
 
 **Caching**: `@st.cache_data` with `_mtime` parameter (file modification timestamp) busts the cache when the `.pro` file changes during a live run.
 

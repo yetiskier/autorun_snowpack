@@ -322,6 +322,31 @@ def find_pro_file(sid: str) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def _find_obs_file(sid: str) -> Path | None:
+    """Locate the borehole temperature CSV for a site directory.
+
+    Site dirs may carry a tag suffix (e.g. ``2007_T2_10m_bucket``);
+    the obs file is named after the canonical ``{year}_{name}_{depth}m`` id.
+    """
+    m = re.match(r"^(\d{4}_.+?_\d+m)(?:_.+)?$", sid)
+    canonical_sid = m.group(1) if m else sid
+    obs_path = (APP_DIR / "AllCoreDataCommonFormat"
+                / "Concatenated_Temperature_files"
+                / f"{canonical_sid}_Tempconcatenated.csv")
+    return obs_path if obs_path.exists() else None
+
+
+def _obs_mtime_for_pro(pro_path_str: str) -> float:
+    """Return the mtime of the obs file paired with a PRO file, or 0.0 if absent.
+
+    Used as a cache-key component so that ``load_pro`` invalidates when either
+    the PRO file or the obs file changes.
+    """
+    sid = Path(pro_path_str).parent.parent.name
+    obs = _find_obs_file(sid)
+    return obs.stat().st_mtime if obs is not None else 0.0
+
+
 def read_run_status(sid: str) -> "dict | None":
     """Return the run_status.json dict written by autorun_snowpack.py, or None."""
     p = project_dir(sid) / "output" / "run_status.json"
@@ -472,8 +497,17 @@ def _to_grid_stepfn(times, heights_list, values_list, depth_grid):
 
 
 @st.cache_data(show_spinner="Parsing PRO file…")
-def load_pro(pro_path_str: str, _mtime: float = 0.0) -> dict:
-    """Parse PRO file and build gridded arrays. v4 (density-filtered refreezing)"""
+def load_pro(pro_path_str: str, _mtime: float = 0.0,
+             _obs_mtime: float = 0.0) -> dict:
+    """Parse PRO file and build gridded arrays. v5 (refreezing gated by obs availability).
+
+    Cumulative refreezing is now restricted to PRO timesteps where temperature
+    observations are available to constrain the model.  During obs gaps SNOWPACK
+    runs unconstrained and any apparent refreezing (often a large LWC dump at
+    gap-end) is a model artefact, not real.  Validity criterion matches the
+    assimilation: at least ``min_obs_for_adjust`` (default 3) sensors must have
+    finite readings at the PRO timestamp.
+    """
     path = Path(pro_path_str)
     pro  = _parse_pro(path)
     times = pd.DatetimeIndex(pro["times"])
@@ -543,6 +577,30 @@ def load_pro(pro_path_str: str, _mtime: float = 0.0) -> dict:
         np.where(d_ice > 0, d_ice, 0.0),
         np.where(d_lwc < 0, -d_lwc, 0.0),
     )
+
+    # ── Obs-availability mask: only count refreezing during obs-constrained
+    # timesteps (matches the assimilation: ≥3 sensors with finite readings).
+    # During gaps the model drifts unbounded and the apparent refreezing is a
+    # numerical artefact (e.g. gap-end LWC dump).
+    sid_from_path = path.parent.parent.name
+    obs_path = _find_obs_file(sid_from_path)
+    if obs_path is not None:
+        try:
+            obs = pd.read_csv(obs_path, skiprows=3, index_col=0, parse_dates=True)
+            obs.columns = pd.to_numeric(obs.columns, errors="coerce")
+            # Reindex to PRO times; tolerance covers half-hourly obs landing
+            # exactly at hourly model timestamps
+            obs_at_pro = obs.reindex(times, method="nearest",
+                                      tolerance=pd.Timedelta("30min"))
+            n_finite   = obs_at_pro.notna().sum(axis=1).values
+            valid_obs  = n_finite >= 3   # min_obs_for_adjust threshold
+            # A refreezing increment between t_i and t_{i+1} counts only if
+            # both endpoints have valid obs (model was constrained at both).
+            step_valid = valid_obs[1:] & valid_obs[:-1]
+            refreezing_per_step = np.where(step_valid, refreezing_per_step, 0.0)
+        except Exception as _e:
+            print(f"[load_pro] obs gap-mask skipped for {sid_from_path}: {_e}")
+
     cumul_refreezing = np.concatenate([[0.0], np.cumsum(refreezing_per_step)])
 
     return {
@@ -739,7 +797,8 @@ def _density_profile_for_timestep(raw: dict, ti: int, smooth_cm: float = 50.0) -
 @st.cache_data(show_spinner="Preparing density data…")
 def _build_density_payload(pro_path_str: str, _mtime: float = 0.0) -> str:
     """JSON payload for the density heatmap + hover profiles component. v2-smooth"""
-    d   = load_pro(pro_path_str, _mtime=_mtime)
+    d   = load_pro(pro_path_str, _mtime=_mtime,
+                   _obs_mtime=_obs_mtime_for_pro(pro_path_str))
     raw = d["raw"]
     times      = d["times"]
     depth_grid = d["depth_grid"]
@@ -793,7 +852,8 @@ def _build_hover_payload(pro_path_str: str, _mtime: float = 0.0) -> str:
     Cached so we only rebuild when the PRO file changes.
     Everything is serialised once; the browser handles hover entirely in JS.
     """
-    d   = load_pro(pro_path_str, _mtime=_mtime)
+    d   = load_pro(pro_path_str, _mtime=_mtime,
+                   _obs_mtime=_obs_mtime_for_pro(pro_path_str))
     raw = d["raw"]
     times      = d["times"]
     depth_grid = d["depth_grid"]
@@ -849,7 +909,8 @@ def _build_hover_payload(pro_path_str: str, _mtime: float = 0.0) -> str:
 @st.cache_data(show_spinner="Preparing heatmap data…")
 def _build_timeseries_payload(pro_path_str: str, sid: str, _mtime: float = 0.0) -> str:
     """Downsampled T, LWC, refreezing + optional observed-T payload for JS charts. v1"""
-    d          = load_pro(pro_path_str, _mtime=_mtime)
+    d          = load_pro(pro_path_str, _mtime=_mtime,
+                          _obs_mtime=_obs_mtime_for_pro(pro_path_str))
     times      = d["times"]
     depth_grid = d["depth_grid"]
     T_grid     = d["T_grid"]
@@ -1037,7 +1098,8 @@ document.getElementById('mk-div').on('plotly_hover',function(data){{
 
     if active_plotly:
         # Load pro grids (cached — only once regardless of which plots are shown)
-        d          = load_pro(str(pro_path), _mtime=mtime)
+        d          = load_pro(str(pro_path), _mtime=mtime,
+                              _obs_mtime=_obs_mtime_for_pro(str(pro_path)))
         times      = d["times"]
         depth_grid = d["depth_grid"]
         T_grid     = d["T_grid"]

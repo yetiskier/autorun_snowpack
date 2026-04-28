@@ -541,14 +541,17 @@ def make_figure(results: pd.DataFrame, diff_grid: np.ndarray,
                       fontweight="bold", loc="left", pad=4)
 
     # ── Panel 2: positive latent heat input ──────────────────────────────
+    # vmin set to 500 J/m³ so noise-floor variations (sub-physical at depth,
+    # likely from density/conductivity model imperfection or numerical residual)
+    # do not draw the eye away from the real latent-heat signal.
     from matplotlib.colors import LogNorm as _LogNorm
     q_vals = Q_pos[np.isfinite(Q_pos)]
     if len(q_vals) and q_vals.max() > 0:
         q_vmax = float(np.nanpercentile(q_vals, 99))
-        q_vmin = max(float(np.nanpercentile(q_vals[q_vals > 0], 5)), 1.0)
-        q_norm = _LogNorm(vmin=q_vmin, vmax=q_vmax)
+        q_vmin = 500.0
+        q_norm = _LogNorm(vmin=q_vmin, vmax=max(q_vmax, q_vmin * 10))
     else:
-        q_norm = _LogNorm(vmin=1, vmax=1e4)
+        q_norm = _LogNorm(vmin=500, vmax=1e5)
     _curtain(axes[1], Q_pos, "hot_r", q_norm, "Q_lh  (J m⁻³)", extend="max")
     axes[1].plot(t_mpl, wf_line, color="cyan", lw=1.5,
                  label="Obs wetting front")
