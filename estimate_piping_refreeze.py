@@ -85,7 +85,7 @@ def build_paths(year: int, site: str, depth: int) -> dict:
 
 
 # ── PRO file parser ───────────────────────────────────────────────────────────
-_PRO_CODES = {501, 502, 506}   # heights, density, LWC
+_PRO_CODES = {501, 502, 506, 515}   # heights, density, LWC, ice vol fraction
 
 def parse_pro(path: Path) -> dict:
     """Parse a SNOWPACK .pro file; return dict of ragged-array time series."""
@@ -320,7 +320,7 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
     n_days      = len(daily_times)
     T_daily_grid = T_daily_df.values   # shape (n_days, nd)
 
-    # ── SNOWPACK density and LWC → daily mean on diffusion grid ─────────────
+    # ── SNOWPACK density → daily mean on diffusion grid ──────────────────
     rho_df  = pd.DataFrame(rho_pro, index=pro_times)
     rho_daily = (rho_df
                  .reindex(rho_df.index.union(daily_times))
@@ -329,15 +329,45 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
                  .reindex(daily_times)
                  .values)   # shape (n_days, nd)
 
-    # SNOWPACK LWC [% vol] on diffusion grid → daily means
-    lwc_pro  = _pro_to_grid(pro_times, pro[501], pro[506], diff_grid)
-    lwc_df   = pd.DataFrame(lwc_pro, index=pro_times)
-    lwc_daily = (lwc_df
-                 .reindex(lwc_df.index.union(daily_times))
-                 .sort_index()
-                 .interpolate(method="time")
-                 .reindex(daily_times)
-                 .values)   # shape (n_days, nd)
+    # ── SNOWPACK column refreezing — same method as app.py `load_pro` ─────
+    # Uses raw Lagrangian per-element data at hourly resolution.
+    # Refreezing = min(Δice_mass, −ΔLWC_mass) per step, summed to daily.
+    # This requires ice to increase AND LWC to decrease simultaneously,
+    # which is the physically correct definition.  Matches the Results tab.
+    n_pro   = len(pro_times)
+    ice_col = np.zeros(n_pro)
+    lwc_col = np.zeros(n_pro)
+    for ti in range(n_pro):
+        h   = np.asarray(pro[501][ti], dtype=float)
+        ice = np.asarray(pro[515][ti], dtype=float)
+        lwc = np.asarray(pro[506][ti], dtype=float)
+        den = np.asarray(pro[502][ti], dtype=float)
+        n   = min(len(h), len(ice), len(lwc), len(den))
+        if n < 2:
+            continue
+        h = h[:n]; ice = ice[:n]; lwc = lwc[:n]; den = den[:n]
+        order = np.argsort(h)
+        h = h[order]; ice = ice[order]; lwc = lwc[order]; den = den[order]
+        mask = (h > 0) & (den < 900.0)   # firn only; exclude soil and glacial ice
+        if mask.sum() < 2:
+            continue
+        h_f = h[mask]; ice_f = ice[mask]; lwc_f = lwc[mask]
+        nf  = len(h_f)
+        thick       = np.empty(nf)
+        thick[1:]   = (h_f[1:] - h_f[:-1]) / 100.0
+        thick[0]    = h_f[0] / 100.0
+        ice_col[ti] = np.nansum(ice_f / 100.0 * thick * 917.0)   # kg/m²
+        lwc_col[ti] = np.nansum(lwc_f / 100.0 * thick * 1000.0)  # kg/m²
+
+    d_ice       = np.diff(ice_col)   # shape n_pro-1
+    d_lwc       = np.diff(lwc_col)
+    sp_hourly   = np.concatenate([[0.0], np.minimum(
+        np.where(d_ice > 0, d_ice, 0.0),
+        np.where(d_lwc < 0, -d_lwc, 0.0),
+    )])   # kg/m² = mm w.e. per hourly step
+    sp_daily_ser = (pd.Series(sp_hourly, index=pro_times)
+                    .resample("D").sum())   # mm w.e. per calendar day
+
 
     # ── Main loop: one CN step per consecutive valid daily pair ───────────
     Q_lh_grid = np.full((n_days - 1, nd), np.nan)
@@ -350,15 +380,8 @@ def compute_piping_refreeze(obs: pd.DataFrame, pro: dict,
         day_i   = daily_times[i]
         day_ip1 = daily_times[i + 1]
 
-        # ── SNOWPACK column refreezing: column-integrated LWC decrease ────
-        # LWC decreasing means liquid water froze.
-        # dM [mm w.e.] = Σ_z max(ΔLWC[%], 0) / 100 × dz [m] × ρ_water [1000 kg/m³]
-        #              = Σ_z max(ΔLWC[%], 0) × dz × 10
-        lwc_i   = lwc_daily[i]
-        lwc_ip1 = lwc_daily[i + 1]
-        d_lwc   = np.where(np.isfinite(lwc_i) & np.isfinite(lwc_ip1),
-                           np.maximum(lwc_i - lwc_ip1, 0.0), 0.0)
-        sp_step  = float(np.sum(d_lwc * DZ * 10))   # mm w.e.
+        # ── SNOWPACK column refreezing for this day (pre-computed above) ──
+        sp_step  = float(sp_daily_ser.get(day_i, 0.0))
         sp_cumul += sp_step
 
         # Skip if either day has a gap anywhere in the domain
@@ -533,7 +556,8 @@ def make_figure(results: pd.DataFrame, diff_grid: np.ndarray,
 
     # ── Panel 3: daily refreezing rate ────────────────────────────────────
     ax3 = axes[2]
-    t_all = mdates.date2num(pd.to_datetime(results["datetime"]).to_pydatetime())
+    t_all = mdates.date2num(
+        pd.DatetimeIndex(results["datetime"]).to_pydatetime())
 
     sp  = results["sp_refreeze_mm_we"].fillna(0).values
     pip = results["m_step_mm_we"].fillna(0).values
